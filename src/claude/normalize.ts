@@ -87,15 +87,19 @@ function resultText(content: unknown): string | undefined {
 export function classifyClaudeError(message: string, assistantError: string | undefined, limit: RateLimit | undefined): TurnError {
   const text = message || "The Claude turn failed.";
   const resetsAt = limit?.status === "rejected" ? limit.resetsAt : undefined;
-  if (limit?.status === "rejected" || /usage limit|hit your limit|limit reached|limit will reset|resets? (at|in)/iu.test(text)) {
-    return { kind: "usage-limit", message: text, ...(resetsAt ? { resetsAt } : {}) };
-  }
-  if (assistantError === "rate_limit") return { kind: "usage-limit", message: text, ...(resetsAt ? { resetsAt } : {}) };
-  if (assistantError === "overloaded" || /overloaded|529/u.test(text)) return { kind: "rate-limit", message: text };
+  // Explicit errors take precedence over an earlier allowance report.
   if (assistantError === "authentication_failed" || assistantError === "oauth_org_not_allowed" || assistantError === "billing_error" || /not logged in|please run \/login|invalid api key/iu.test(text)) {
     return { kind: "auth", message: text };
   }
   if (/prompt is too long|context window|context length/iu.test(text)) return { kind: "context-window", message: text };
+  if (assistantError === "overloaded" || /\boverloaded\b|\b529\b/iu.test(text)) return { kind: "rate-limit", message: text };
+  if (/\b(?:ENOTFOUND|EAI_AGAIN|ECONNRESET|ECONNREFUSED|ECONNABORTED|ETIMEDOUT|ENETUNREACH|ENETDOWN|EHOSTUNREACH|EPIPE)\b|fetch failed|socket hang up|can'?t reach the api|check your internet|network (?:error|is unreachable)|connection (?:error|reset|refused|closed|lost|dropped)|stream (?:disconnected|closed|ended) before|error sending request|\btimed? ?out\b|\btimeout\b|repeated api errors|bad gateway|service unavailable|gateway time-?out|internal server error|\b(?:api error|status|http)\b\D{0,12}\b(?:500|502|503|504)\b/iu.test(text)) {
+    return { kind: "connection", message: text };
+  }
+  if (limit?.status === "rejected" || /usage limit|hit your limit|limit reached|limit will reset|resets? (at|in)/iu.test(text)) {
+    return { kind: "usage-limit", message: text, ...(resetsAt ? { resetsAt } : {}) };
+  }
+  if (assistantError === "rate_limit") return { kind: "usage-limit", message: text, ...(resetsAt ? { resetsAt } : {}) };
   return { kind: "other", message: text };
 }
 
@@ -126,6 +130,7 @@ export class ClaudeNormalizer {
   /** Clears per-turn state. */
   startTurn(): void {
     this.assistantError = undefined;
+    this.lastLimit = undefined;
   }
 
   /** Maps one SDK message to zero or more events for `turnId`. */

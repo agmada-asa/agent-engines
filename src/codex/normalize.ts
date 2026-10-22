@@ -79,8 +79,9 @@ export function classifyCodexError(error: Json | undefined | null, limits: reado
     case "sessionBudgetExceeded":
       return { kind: "usage-limit", message, ...(resetsAt ? { resetsAt } : {}) };
     case "rateLimitExceeded":
-    case "serverOverloaded":
       return { kind: "rate-limit", message, ...(resetsAt ? { resetsAt } : {}) };
+    case "serverOverloaded":
+      return { kind: "rate-limit", message };
     case "contextWindowExceeded":
       return { kind: "context-window", message };
     case "unauthorized":

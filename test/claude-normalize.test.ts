@@ -8,6 +8,24 @@ import type { SDKMessage } from "@anthropic-ai/claude-agent-sdk";
 const S = "session-1";
 const msg = (value: Record<string, unknown>) => value as unknown as SDKMessage;
 
+test("network and service failures remain recoverable without masking sign-in errors", () => {
+  const rejected = { status: "rejected" as const, resetsAt: new Date("2026-10-22T13:00:00Z") };
+  for (const message of ["fetch failed", "API Error: Can't reach the API server (ENOTFOUND)", "Request timed out", "API Error: 503 Service Unavailable", "stream disconnected before completion", "socket hang up"]) {
+    assert.equal(classifyClaudeError(message, undefined, rejected).kind, "connection", message);
+  }
+  assert.equal(classifyClaudeError("Please run /login", "authentication_failed", rejected).kind, "auth");
+  assert.equal(classifyClaudeError("Prompt is too long", undefined, rejected).kind, "context-window");
+  assert.deepEqual(classifyClaudeError("Overloaded", "overloaded", rejected), { kind: "rate-limit", message: "Overloaded" });
+  assert.deepEqual(classifyClaudeError("You hit your limit", "rate_limit", undefined), { kind: "usage-limit", message: "You hit your limit" });
+});
+
+test("a previous turn's rejected allowance does not classify the next turn's failure", () => {
+  const n = new ClaudeNormalizer(S);
+  n.normalize(msg({ type: "rate_limit_event", rate_limit_info: { status: "rejected", resetsAt: 1800000000 } }), "t1");
+  n.startTurn();
+  assert.equal(classifyClaudeError("Tool failed", n.assistantError, n.lastLimit).kind, "other");
+});
+
 test("streamed text and the whole message share an item ID", () => {
   const n = new ClaudeNormalizer(S);
   assert.deepEqual(n.normalize(msg({ type: "stream_event", parent_tool_use_id: null, event: { type: "message_start", message: { id: "m1" } } }), "t"), []);

@@ -138,6 +138,7 @@ test("compaction, reroutes and resolved requests", () => {
 });
 
 test("classifyCodexError", () => {
+  assert.deepEqual(classifyCodexError({ message: "busy", codexErrorInfo: "serverOverloaded" }, [{ status: "rejected", resetsAt: new Date("2026-10-22T13:00:00Z") }]), { kind: "rate-limit", message: "busy" });
   assert.equal(classifyCodexError({ message: "x", codexErrorInfo: "contextWindowExceeded" }).kind, "context-window");
   assert.equal(classifyCodexError({ message: "x", codexErrorInfo: { httpConnectionFailed: { httpStatusCode: 502 } } }).kind, "connection");
   assert.equal(classifyCodexError({ message: "x", codexErrorInfo: "unauthorized" }).kind, "auth");

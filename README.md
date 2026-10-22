@@ -87,6 +87,8 @@ A `request` is an approval, a question (Claude's AskUserQuestion, Codex's user-i
 
 A failed turn has an `error.kind`: `usage-limit` and `rate-limit` come with `resetsAt` when the runtime says, so an app can try again then.
 
+Network failures have kind `connection`. Authentication and context errors stay distinct even if an earlier usage report was rejected. The engine restores runtime connections and thread handles; the app decides whether and when to retry interrupted work, persists pending retries and cancels them when the user stops. A transient overload does not inherit an unrelated subscription reset time.
+
 `thread.subscribe` sees every event on the thread, including turns the agent starts by itself (Claude does when a background subagent reports back).
 
 ## Behaviour worth knowing
