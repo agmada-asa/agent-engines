@@ -45,6 +45,8 @@ import type { GetAccountResponse } from "./protocol/v2/GetAccountResponse.ts";
 import type { ListMcpServerStatusResponse } from "./protocol/v2/ListMcpServerStatusResponse.ts";
 import type { Model } from "./protocol/v2/Model.ts";
 import type { ModelListResponse } from "./protocol/v2/ModelListResponse.ts";
+import type { ThreadListParams } from "./protocol/v2/ThreadListParams.ts";
+import type { ThreadListResponse } from "./protocol/v2/ThreadListResponse.ts";
 import type { ThreadResumeParams } from "./protocol/v2/ThreadResumeParams.ts";
 import type { ThreadStartParams } from "./protocol/v2/ThreadStartParams.ts";
 import type { ThreadStartResponse } from "./protocol/v2/ThreadStartResponse.ts";
@@ -198,12 +200,13 @@ export class CodexEngine implements Engine {
   async deleteThread(threadId: string, _options: { cwd: string }): Promise<void> {
     const client = await this.connection();
     const owner = [...this.threads].find((thread) => thread.id === threadId);
-    const ids = [...(owner?.subagentIds ?? []), threadId];
+    // Subagents this engine saw, and any Codex still records from earlier runs.
+    const ids = [...new Set([...(owner?.subagentIds ?? []), ...(await descendantThreadIds(client, threadId)), threadId])];
     if (owner) await owner.close();
     for (const id of ids) {
       await client.request("thread/delete", { threadId: id }).catch((error: unknown) => {
         // A thread already deleted, or never written, is the outcome asked for.
-        if (!(error instanceof CodexRpcError) || !/not found|no such|does not exist|unknown thread/iu.test(error.message)) throw error;
+        if (!(error instanceof CodexRpcError) || !/not found|no rollout found|no such|does not exist|unknown thread/iu.test(error.message)) throw error;
       });
     }
   }
@@ -296,6 +299,26 @@ export class CodexEngine implements Engine {
     const thread = [...this.threads].find((candidate) => candidate.owns(params.threadId));
     return thread?.request(request.id, request.method, request.params);
   }
+}
+
+/**
+ * Every subagent thread spawned under `threadId`, at any depth, as Codex records
+ * them. Empty when the runtime cannot say, so callers fall back to what they saw.
+ */
+async function descendantThreadIds(client: CodexClient, threadId: string): Promise<string[]> {
+  const ids = new Set<string>();
+  for (const archived of [false, true]) {
+    let cursor: string | null = null;
+    for (let page = 0; page < 20; page += 1) {
+      const params: ThreadListParams = { ancestorThreadId: threadId, archived, limit: 100, ...(cursor ? { cursor } : {}) };
+      const response: ThreadListResponse | undefined = await client.request<ThreadListResponse>("thread/list", params).catch(() => undefined);
+      if (!response) return [...ids];
+      for (const thread of response.data) ids.add(thread.id);
+      cursor = response.nextCursor;
+      if (!cursor) break;
+    }
+  }
+  return [...ids];
 }
 
 /** Availability from `account/read`. */
@@ -424,8 +447,10 @@ class CodexThread implements Thread {
   }
 
   async subagentTranscript(agentId: string): Promise<TranscriptEntry[]> {
-    if (!this.normalizer.subagentIds.includes(agentId)) throw new AgentEngineError(`No subagent ${agentId} on this thread.`);
     const client = await this.ready();
+    if (!this.normalizer.subagentIds.includes(agentId) && !(await descendantThreadIds(client, this.id)).includes(agentId)) {
+      throw new AgentEngineError(`No subagent ${agentId} on this thread.`);
+    }
     const entries: TranscriptEntry[] = [];
     let cursor: string | null = null;
     for (let page = 0; page < 20; page += 1) {

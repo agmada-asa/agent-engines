@@ -51,6 +51,7 @@ const ROOTS = [
   "v2/ThreadResumeParams.ts", "v2/ThreadResumeResponse.ts",
   "v2/ThreadTurnsListParams.ts", "v2/ThreadTurnsListResponse.ts",
   "v2/ThreadDeleteParams.ts", "v2/ThreadCompactStartParams.ts",
+  "v2/ThreadListParams.ts", "v2/ThreadListResponse.ts",
   "v2/TurnStartParams.ts", "v2/TurnStartResponse.ts",
   "v2/TurnSteerParams.ts", "v2/TurnSteerResponse.ts",
   "v2/TurnInterruptParams.ts",

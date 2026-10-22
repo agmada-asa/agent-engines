@@ -49,6 +49,7 @@ export const CODEX_PROTOCOL_CONTRACT = {
     "thread/turns/list",
     "thread/compact/start",
     "thread/delete",
+    "thread/list",
     "thread/unsubscribe",
     "mcpServerStatus/list",
     "turn/start",

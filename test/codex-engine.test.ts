@@ -293,6 +293,17 @@ test("deleteThread deletes the thread and the subagents it saw", async () => {
   await engine.close();
 });
 
+test("deleteThread finds subagents from earlier runs through thread/list", async () => {
+  const { spawn, children } = fakeSpawner(handlers({
+    "thread/list": (params: any) => ({ data: params.archived ? [{ id: "old-2" }] : [{ id: "old-1" }], nextCursor: null, backwardsCursor: null, readStates: null }),
+  }));
+  const engine = new CodexEngine({ spawnProcess: spawn });
+  await engine.deleteThread("saved-thread", { cwd: "/tmp" });
+  assert.deepEqual(children[0].requests("thread/list").map((params) => params.ancestorThreadId), ["saved-thread", "saved-thread"]);
+  assert.deepEqual(children[0].requests("thread/delete").map((params) => params.threadId), ["old-1", "old-2", "saved-thread"]);
+  await engine.close();
+});
+
 test("run() while a turn is active throws", async () => {
   const { spawn } = fakeSpawner(handlers());
   const engine = new CodexEngine({ spawnProcess: spawn });
