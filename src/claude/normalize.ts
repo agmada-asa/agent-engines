@@ -152,8 +152,8 @@ export class ClaudeNormalizer {
   private readonly taskByToolUse = new Map<string, string>();
   private readonly subagents = new Set<string>();
   private readonly endedSubagents = new Set<string>();
-  /** Non-agent tasks seen so far, and those that have ended. */
-  private readonly tasks = new Set<string>();
+  /** Non-agent tasks seen so far → the subagent that launched each, if any; and those that have ended. */
+  private readonly tasks = new Map<string, string | undefined>();
   private readonly endedTasks = new Set<string>();
   /** message id → block index → item id, for streamed blocks. */
   private readonly streamBlocks = new Map<string, Map<number, string>>();
@@ -302,7 +302,7 @@ export class ClaudeNormalizer {
       case "task_progress": {
         const usage = taskUsage(record(m.usage));
         return [{
-          ...base,
+          ...this.taskBase(base, String(m.task_id)),
           type: "task.progress",
           taskId: String(m.task_id),
           ...(typeof m.description === "string" && m.description ? { description: m.description } : {}),
@@ -320,7 +320,7 @@ export class ClaudeNormalizer {
           ...(typeof patch.is_backgrounded === "boolean" ? { background: patch.is_backgrounded } : {}),
           ...(typeof patch.error === "string" && patch.error ? { error: patch.error } : {}),
         };
-        return Object.keys(update).length ? [{ ...base, type: "task.progress", taskId: String(m.task_id), ...update }] : [];
+        return Object.keys(update).length ? [{ ...this.taskBase(base, String(m.task_id)), type: "task.progress", taskId: String(m.task_id), ...update }] : [];
       }
       case "task_notification": {
         const id = String(m.task_id);
@@ -366,12 +366,11 @@ export class ClaudeNormalizer {
 
   private taskStarted(m: Json, base: { threadId: string; turnId: string }, id: string): AgentEvent[] {
     if (this.tasks.has(id)) return [];
-    this.tasks.add(id);
     // A task a subagent launched belongs to that subagent's events.
     const parent = typeof m.parent_task_id === "string" && this.subagents.has(m.parent_task_id) ? m.parent_task_id : undefined;
+    this.tasks.set(id, parent);
     return [{
-      ...base,
-      ...(parent ? { agentId: parent } : {}),
+      ...this.taskBase(base, id),
       type: "task.started",
       taskId: id,
       kind: TASK_KINDS[m.task_type] ?? String(m.task_type),
@@ -381,12 +380,18 @@ export class ClaudeNormalizer {
     }];
   }
 
+  /** Event fields for a task, tagged with the subagent that launched it. */
+  private taskBase(base: { threadId: string; turnId: string }, id: string): { threadId: string; turnId: string; agentId?: string } {
+    const parent = this.tasks.get(id);
+    return parent ? { ...base, agentId: parent } : base;
+  }
+
   private taskEnded(m: Json, base: { threadId: string; turnId: string }, id: string): AgentEvent[] {
     if (this.endedTasks.has(id)) return [];
     this.endedTasks.add(id);
     const usage = taskUsage(record(m.usage));
     return [{
-      ...base,
+      ...this.taskBase(base, id),
       type: "task.ended",
       taskId: id,
       status: m.status === "completed" ? "completed" : m.status === "failed" ? "failed" : "stopped",

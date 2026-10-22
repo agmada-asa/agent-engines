@@ -183,6 +183,9 @@ test("subagents keep subagent events, report progress as tasks, and own the task
   }]);
   const child = n.normalize(msg({ type: "system", subtype: "task_started", task_id: "bash-2", description: "tests", task_type: "local_bash", parent_task_id: "agent-1" }), "t");
   assert.equal(child[0].agentId, "agent-1");
+  assert.equal(n.normalize(msg({ type: "system", subtype: "task_updated", task_id: "bash-2", patch: { status: "running" } }), "t")[0].agentId, "agent-1");
+  assert.equal(n.normalize(msg({ type: "system", subtype: "task_progress", task_id: "bash-2", description: "tests" }), "t")[0].agentId, "agent-1");
+  assert.equal(n.normalize(msg({ type: "system", subtype: "task_notification", task_id: "bash-2", status: "completed" }), "t")[0].agentId, "agent-1");
   assert.deepEqual(n.normalize(msg({ type: "system", subtype: "task_updated", task_id: "agent-1", patch: { status: "killed", is_backgrounded: true } }), "t"), [
     { threadId: S, turnId: "t", type: "task.progress", taskId: "agent-1", status: "stopped", background: true },
   ]);

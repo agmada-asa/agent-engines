@@ -81,7 +81,43 @@ Anything runtime-specific goes in `codex: {…}` (approval policy, approvals rev
 
 ### Events
 
-`turn.started`, `text.delta` / `text.done`, `reasoning.delta` / `reasoning.done`, `tool.started` / `tool.completed`, `file.changed`, `subagent.started` / `subagent.ended`, `request` / `request.resolved`, `usage`, `rate-limit`, `compacted`, `model.rerouted`, `turn.completed`, `turn.failed`.
+`turn.started`, `text.delta` / `text.done`, `reasoning.delta` / `reasoning.done`, `tool.started` / `tool.output.delta` / `tool.progress` / `tool.completed`, `file.changed`, `diff.updated`, `plan.updated`, `plan.proposal.delta` / `plan.proposal.done`, `status`, `task.started` / `task.progress` / `task.ended`, `subagent.started` / `subagent.ended`, `request` / `request.resolved`, `usage`, `rate-limit`, `compacted`, `model.rerouted`, `turn.completed`, `turn.failed`.
+
+The union grows in minor releases. A `switch` on `event.type` should have a default branch rather than an exhaustive check that fails to compile when a new member arrives.
+
+#### Live progress
+
+These are for showing work as it happens. None of them changes a turn's result: `tool.completed` still carries the whole output and `turn.completed` the reply.
+
+| Event | Codex | Claude |
+| --- | --- | --- |
+| `tool.output.delta` | command output as it streams | not sent; the SDK does not stream command output |
+| `tool.progress` | MCP tool progress `message` | `elapsedSeconds` of a running tool |
+| `diff.updated` | the turn's whole unified diff so far, replacing the last one | not sent; use `file.changed` |
+| `plan.updated` | the checklist, whole each time, with an optional `explanation` | each TodoWrite list, with `itemId` of the call |
+| `plan.proposal.delta` / `.done` | a plan streamed in plan mode; `.done` has the final text | not sent |
+| `status` | from the thread status: `working`, `waiting` (with `waitingOn`), `idle`; `compacting`; `retrying` | `working`, `compacting`, `retrying` with attempt and delay |
+| `task.started` / `task.ended` | not sent | background shells, monitors, workflows and MCP tasks |
+| `task.progress` | not sent | the same tasks, and subagents (`taskId` is the `subagentId`) |
+
+```ts
+thread.subscribe((event) => {
+  switch (event.type) {
+    case "tool.output.delta": appendToTerminal(event.itemId, event.delta); break;
+    case "plan.updated": showChecklist(event.steps); break; // { step, status: "pending" | "in-progress" | "completed" }
+    case "status": showStatus(event.status.state); break;
+    case "task.progress": showTask(event.taskId, event.summary ?? event.description); break;
+    default: break;
+  }
+});
+```
+
+Limits worth knowing:
+
+- `status` is a hint for a status line, not a turn lifecycle; use `turn.completed` and `turn.failed` for that. A Codex `idle` usually arrives after `turn.completed`, so it reaches `thread.subscribe` but not the turn's iterator.
+- Claude reports `idle` and `waiting` only through session-state events, which the SDK sends when a session opts in. The engine does not opt in, so from Claude expect `working`, `compacting` and `retrying`; a pending `request` is the sign it is waiting.
+- `retrying` means the runtime will try the model request again; the turn has not failed.
+- A task a subagent launched carries that subagent's `agentId`. `task.ended` needs the `task.started` from the same thread handle, so a task begun before a resume does not end on the new handle.
 
 Codex marks each agent message's `phase` on `text.delta` and `text.done`: `commentary` for a progress note between tool calls, `answer` for the reply. Claude's text events have no phase. A turn's result text is never a progress note.
 
