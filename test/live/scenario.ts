@@ -35,12 +35,14 @@ function summary(step: string, events: AgentEvent[], result: TurnResult): string
 export async function smokeScenario(engine: Engine, thread: Omit<ThreadOptions, "cwd">, log: (line: string) => void): Promise<void> {
   const cwd = await mkdtemp(join(tmpdir(), `agent-engines-live-${engine.provider}-`));
   const options: ThreadOptions = { ...thread, cwd, access: "full" };
+  let threadId: string | undefined;
   try {
     const availability = await engine.availability();
     log(`availability: ${availability.reason} ${availability.version ?? ""} ${availability.account?.plan ?? ""}`);
     assert.equal(availability.ready, true, availability.message);
 
     const first = await engine.startThread(options);
+    threadId = first.id;
     log(`thread: ${first.id}`);
 
     // Steer: change the answer while the command runs.
@@ -86,8 +88,11 @@ export async function smokeScenario(engine: Engine, thread: Omit<ThreadOptions, 
     assert.ok(c.events.some((event) => event.type === "compacted"), "no compacted event");
 
     await engine.deleteThread(first.id, { cwd });
+    threadId = undefined;
     log("deleted thread");
   } finally {
+    // A failed run still leaves nothing behind.
+    if (threadId) await engine.deleteThread(threadId, { cwd }).catch(() => undefined);
     await engine.close();
     await rm(cwd, { recursive: true, force: true });
   }

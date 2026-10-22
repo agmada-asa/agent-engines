@@ -1,7 +1,7 @@
 /** @file The Claude engine against a scripted fake SDK: options, turns, steer, interrupt, compact, requests. */
 
 import assert from "node:assert/strict";
-import { mkdtemp, mkdir, readdir, writeFile } from "node:fs/promises";
+import { mkdtemp, mkdir, readdir, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
@@ -270,7 +270,16 @@ test("deleteThread removes the session and the files kept beside it", async () =
   await mkdir(join(home, "file-history", id), { recursive: true });
   await mkdir(join(home, "todos"), { recursive: true });
   await writeFile(join(home, "todos", `${id}-agent-${id}.json`), "[]");
-  const { sdk, deleted } = fakeClaudeSdk();
+  const fake = fakeClaudeSdk();
+  const { deleted } = fake;
+  // Like the real one, deleteSession removes the transcript itself.
+  const sdk = {
+    ...fake.sdk,
+    deleteSession: async (session: string, options?: { dir?: string }) => {
+      await fake.sdk.deleteSession(session, options);
+      for (const project of await readdir(join(home, "projects"))) await rm(join(home, "projects", project, `${session}.jsonl`), { force: true });
+    },
+  };
   const engine = new ClaudeEngine({ sdk, configDir: home });
   await engine.deleteThread(id, { cwd: "/tmp/work" });
   assert.deepEqual(deleted, [{ id, dir: "/tmp/work" }]);

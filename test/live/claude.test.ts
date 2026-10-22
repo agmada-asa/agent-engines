@@ -27,11 +27,13 @@ test("Claude: turn, steer, interrupt, compact, resume, delete", { skip: !LIVE &&
 test("Claude: AskUserQuestion surfaces as a request even with full access", { skip: !LIVE && "set AGENT_ENGINES_LIVE=1", timeout: 180_000 }, async (t) => {
   const engine = new ClaudeEngine();
   const cwd = await mkdtemp(join(tmpdir(), "agent-engines-live-claude-"));
+  let threadId: string | undefined;
   try {
     const thread = await engine.startThread({
       cwd, model: MODEL, effort: "low", access: "full", mcpServers: {},
       claude: { settingSources: [], strictMcpConfig: true, skills: [] },
     });
+    threadId = thread.id;
     let asked = false;
     const turn = thread.run("Use the AskUserQuestion tool to ask whether I prefer tea or coffee (options: Tea, Coffee). Then reply with my answer in one word.");
     for await (const event of turn) {
@@ -44,8 +46,8 @@ test("Claude: AskUserQuestion surfaces as a request even with full access", { sk
     t.diagnostic(`question turn: ${result.status} "${result.text}"`);
     assert.equal(asked, true);
     assert.match(result.text, /coffee/iu);
-    await engine.deleteThread(thread.id, { cwd });
   } finally {
+    if (threadId) await engine.deleteThread(threadId, { cwd }).catch(() => undefined);
     await engine.close();
     await rm(cwd, { recursive: true, force: true });
   }

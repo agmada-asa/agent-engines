@@ -232,13 +232,19 @@ export class ClaudeEngine implements Engine {
     if (!/^[A-Za-z0-9_-]{1,128}$/u.test(threadId)) throw new AgentEngineError("That is not a Claude session ID.");
     const owner = [...this.threads].find((thread) => thread.id === threadId);
     await owner?.close();
-    await this.sdk.deleteSession(threadId, { dir: options.cwd }).catch(() => undefined);
     const home = this.options.configDir ?? process.env.CLAUDE_CONFIG_DIR ?? join(homedir(), ".claude");
     const mine = (name: string) => name === threadId || name.startsWith(`${threadId}.`) || name.startsWith(`${threadId}-`);
+    // Found before deleteSession removes the transcript, so emptied project folders can be tidied after.
     const projects = join(home, "projects");
+    const holders: string[] = [];
     for (const project of await readdir(projects).catch(() => [] as string[])) {
+      if ((await readdir(join(projects, project)).catch(() => [] as string[])).some(mine)) holders.push(join(projects, project));
+    }
+    await this.sdk.deleteSession(threadId, { dir: options.cwd }).catch(() => undefined);
+    for (const dir of holders) {
+      await removeMatching(dir, mine);
       // A project folder this thread emptied goes too; `rmdir` leaves one with anything still in it.
-      if (await removeMatching(join(projects, project), mine)) await removeIfEmpty(join(projects, project), ["memory"]);
+      await removeIfEmpty(dir, ["memory"]);
     }
     for (const dir of ["session-env", "file-history", "todos", "debug", "shell-snapshots"]) await removeMatching(join(home, dir), mine);
   }
