@@ -47,11 +47,11 @@ test("tool calls: commands, MCP tools and web search", () => {
   assert.equal((finished[0] as any).isError, true);
   const mcp = n.normalize("item/completed", {
     threadId: T, turnId: "turn-1",
-    item: { type: "mcpToolCall", id: "t1", server: "ocean", tool: "search_memory", arguments: { q: "x" }, status: "completed", result: { content: [{ type: "text", text: "found" }] }, error: null },
+    item: { type: "mcpToolCall", id: "t1", server: "notes", tool: "search", arguments: { q: "x" }, status: "completed", result: { content: [{ type: "text", text: "found" }] }, error: null },
   });
   assert.deepEqual(mcp[0], {
     threadId: T, turnId: "turn-1", type: "tool.completed", itemId: "t1",
-    tool: { kind: "mcp", name: "mcp__ocean__search_memory", server: "ocean", input: { q: "x" } }, output: "found", isError: false,
+    tool: { kind: "mcp", name: "mcp__notes__search", server: "notes", input: { q: "x" } }, output: "found", isError: false,
   });
   const search = n.normalize("item/started", { threadId: T, turnId: "turn-1", item: { type: "webSearch", id: "w1", query: "weather" } });
   assert.equal((search[0] as any).tool.kind, "web-search");

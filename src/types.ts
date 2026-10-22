@@ -282,7 +282,7 @@ export interface RateLimit {
 export interface ToolCall {
   /** `command` for shell, `mcp` for MCP tools, `web-search`, `host` for host-answered tools, `builtin` for the rest. */
   kind: "command" | "mcp" | "web-search" | "host" | "builtin";
-  /** Tool name: `Bash`, `mcp__ocean__search_memory`, `exec`… */
+  /** Tool name: `Bash`, `mcp__notes__search`, `exec`… */
   name: string;
   /** MCP server, for `mcp` calls. */
   server?: string;

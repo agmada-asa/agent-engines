@@ -19,7 +19,7 @@ function record(value: unknown): Json | undefined {
 
 /**
  * Sums Claude's per-model usage. Input counts cache reads and writes, matching
- * Codex's input total. (From an earlier app's Claude engine.)
+ * Codex's input total.
  */
 export function claudeUsage(modelUsage: Readonly<Record<string, ModelUsage>> | undefined): TokenUsage | undefined {
   if (!modelUsage || !Object.keys(modelUsage).length) return undefined;

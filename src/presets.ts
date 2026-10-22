@@ -1,5 +1,5 @@
 /**
- * @file Ready-made restrictive settings, taken from an earlier app's job runner, for
+ * @file Ready-made restrictive settings for
  * consumers that run agents on untrusted input. Nothing applies them by
  * default; spread them into engine or thread options where wanted.
  */
@@ -11,7 +11,7 @@ import type { CodexLaunchOptions } from "./codex/client.ts";
 import type { ThreadOptions } from "./types.ts";
 
 /**
- * Codex features a job runner switches off for job children. `code_mode_host`
+ * Codex features switched off for unattended job children. `code_mode_host`
  * stays on: Codex routes host tool calls through it.
  */
 export const LOCKED_DOWN_CODEX_FEATURES = [

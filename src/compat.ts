@@ -1,6 +1,6 @@
 /**
  * @file What this library needs from each runtime, and checks of an installed
- * runtime against it. Ported from Blitz's `runtime-compat.ts`.
+ * runtime against it.
  *
  * Runtimes update on their own schedule, and drift usually shows up later as a
  * failed turn. `CODEX_PROTOCOL_CONTRACT` lists every Codex method and enum value

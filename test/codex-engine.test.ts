@@ -68,7 +68,7 @@ test("a thread starts with mapped options, runs a turn and streams normalised ev
   const engine = new CodexEngine({ spawnProcess: spawn });
   const thread = await engine.startThread({
     cwd: "/tmp/work", model: "gpt-6-luna", effort: "low", fastMode: true, access: "full", instructions: "Be brief.",
-    mcpServers: { ocean: { command: "/usr/bin/node", args: ["mcp.js"], env: { A: "1" } }, remote: { type: "http", url: "https://x.test/mcp" } },
+    mcpServers: { notes: { command: "/usr/bin/node", args: ["mcp.js"], env: { A: "1" } }, remote: { type: "http", url: "https://x.test/mcp" } },
   });
   assert.equal(thread.id, THREAD);
   const server = children[0];
@@ -79,7 +79,7 @@ test("a thread starts with mapped options, runs a turn and streams normalised ev
   assert.equal(start.developerInstructions, "Be brief.");
   assert.equal(start.serviceTier, "priority");
   assert.equal(start.allowProviderModelFallback, false);
-  assert.deepEqual(start.config.mcp_servers, { ocean: { command: "/usr/bin/node", args: ["mcp.js"], env: { A: "1" } }, remote: { url: "https://x.test/mcp" } });
+  assert.deepEqual(start.config.mcp_servers, { notes: { command: "/usr/bin/node", args: ["mcp.js"], env: { A: "1" } }, remote: { url: "https://x.test/mcp" } });
 
   const turn = thread.run({ text: "Say hi", images: [{ type: "path", path: "/tmp/a.png" }] });
   const events = collect(turn);

@@ -1,8 +1,7 @@
 /**
  * @file A bounded stdio JSON-RPC client for one `codex app-server --listen
- * stdio://` child. Adapted from an earlier app's `agent-runtime` client (itself from
- * Blitz's `codex-app-server.ts`), with the policy taken out: launch flags,
- * server-request answers and which methods are called are all the caller's.
+ * stdio://` child. It holds no policy: launch flags, server-request answers
+ * and which methods are called are all the caller's.
  *
  * It correlates requests and responses, routes notifications and server
  * requests, checks the serving version on `initialize`, bounds every buffer, and

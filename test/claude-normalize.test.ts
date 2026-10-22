@@ -29,12 +29,12 @@ test("tool use and results, with file changes from Edit and Write", () => {
   const started = n.normalize(msg({ type: "assistant", parent_tool_use_id: null, message: { id: "m", content: [
     { type: "tool_use", id: "b1", name: "Bash", input: { command: "ls" } },
     { type: "tool_use", id: "w1", name: "Write", input: { file_path: "/tmp/new.txt", content: "x" } },
-    { type: "tool_use", id: "p1", name: "mcp__ocean__search_memory", input: { query: "x" } },
+    { type: "tool_use", id: "p1", name: "mcp__notes__search", input: { query: "x" } },
   ] } }), "t");
   assert.deepEqual(started.map((event: any) => event.tool), [
     { kind: "command", name: "Bash", input: { command: "ls" } },
     { kind: "builtin", name: "Write", input: { file_path: "/tmp/new.txt", content: "x" } },
-    { kind: "mcp", name: "mcp__ocean__search_memory", server: "ocean", input: { query: "x" } },
+    { kind: "mcp", name: "mcp__notes__search", server: "notes", input: { query: "x" } },
   ]);
   const bash = n.normalize(msg({ type: "user", parent_tool_use_id: null, message: { role: "user", content: [{ type: "tool_result", tool_use_id: "b1", content: "a\nb", is_error: false }] } }), "t");
   assert.deepEqual(bash, [{ threadId: S, turnId: "t", type: "tool.completed", itemId: "b1", tool: { kind: "command", name: "Bash", input: { command: "ls" } }, output: "a\nb", isError: false }]);
