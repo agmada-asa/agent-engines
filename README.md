@@ -77,13 +77,15 @@ While a turn runs, `turn.steer("…")` adds a message to it and `turn.interrupt(
 | `env` | engine-wide only (`CodexEngineOptions.env`) | per thread |
 | `strictModel` | fails a silent model swap | same |
 
-Anything runtime-specific goes in `codex: {…}` (approval policy, sandbox, network (also reasserted with the sandbox and approval policy on every turn), `config` overrides, host-answered `dynamicTools`, ephemeral) or `claude: {…}` (setting sources, built-in tools, allowed and disallowed tools, permission mode, skills, system prompt, and `extra` for any other SDK option).
+Anything runtime-specific goes in `codex: {…}` (approval policy, approvals reviewer, sandbox, network (also reasserted with the sandbox and approval policy on every turn), `config` overrides, host-answered `dynamicTools`, ephemeral) or `claude: {…}` (setting sources, built-in tools, allowed and disallowed tools, permission mode, skills, system prompt, and `extra` for any other SDK option).
 
 ### Events
 
 `turn.started`, `text.delta` / `text.done`, `reasoning.delta` / `reasoning.done`, `tool.started` / `tool.completed`, `file.changed`, `subagent.started` / `subagent.ended`, `request` / `request.resolved`, `usage`, `rate-limit`, `compacted`, `model.rerouted`, `turn.completed`, `turn.failed`.
 
-A `request` is an approval, a question (Claude's AskUserQuestion, Codex's user-input request) or an MCP elicitation. Call its `respond` once; an unanswered request is cancelled when the turn ends.
+Codex marks each agent message's `phase` on `text.delta` and `text.done`: `commentary` for a progress note between tool calls, `answer` for the reply. Claude's text events have no phase. A turn's result text is never a progress note.
+
+A `request` is an approval, a question (Claude's AskUserQuestion, Codex's user-input request) or an MCP elicitation. Call its `respond` once; an unanswered request is cancelled when the turn ends. A Codex file-change approval carries the proposed `changes`, with diffs, so the user can review them before allowing.
 
 A failed turn has an `error.kind`: `usage-limit` and `rate-limit` come with `resetsAt` when the runtime says, so an app can try again then.
 

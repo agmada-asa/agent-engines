@@ -12,6 +12,7 @@ import type {
   AgentEvent,
   AgentRequest,
   FileChange,
+  MessagePhase,
   RateLimit,
   TokenUsage,
   ToolCall,
@@ -164,6 +165,22 @@ function fileChanges(item: Json): FileChange[] {
   return changes;
 }
 
+/** Codex's message phase in the neutral shape; partial and final answers are both the answer. */
+function messagePhase(phase: unknown): MessagePhase | undefined {
+  if (phase === "commentary") return "commentary";
+  if (phase === "final_answer" || phase === "partial_answer") return "answer";
+  return undefined;
+}
+
+/** Most items of each kind remembered from `item/started` (agent message phases, proposed file changes). */
+const MAX_REMEMBERED_ITEMS = 256;
+
+/** Adds to a bounded map, forgetting the oldest entry once it is full. */
+function remember<V>(map: Map<string, V>, key: string, value: V): void {
+  if (map.size >= MAX_REMEMBERED_ITEMS && !map.has(key)) map.delete(map.keys().next().value!);
+  map.set(key, value);
+}
+
 const ENDED_AGENT = new Set(["completed", "errored", "shutdown", "interrupted", "notFound"]);
 
 /** Notifications for one thread and its subagents, as neutral events. */
@@ -176,6 +193,8 @@ export class CodexNormalizer {
   private readonly endedSubagents = new Set<string>();
   private readonly turnText = new Map<string, string>();
   private readonly turnErrors = new Map<string, Json>();
+  private readonly phases = new Map<string, MessagePhase>();
+  private readonly proposed = new Map<string, FileChange[]>();
   private latestUsage?: TokenUsage;
 
   constructor(readonly threadId: string) {}
@@ -183,6 +202,11 @@ export class CodexNormalizer {
   /** Subagent thread IDs seen so far, so the engine can route and delete them. */
   get subagentIds(): string[] {
     return [...this.subagents];
+  }
+
+  /** The changes a `fileChange` item announced when it started, for the approval that follows. */
+  proposedChanges(itemId: unknown): FileChange[] | undefined {
+    return typeof itemId === "string" ? this.proposed.get(itemId) : undefined;
   }
 
   /** Whether a notification for `threadId` belongs to this thread. */
@@ -213,8 +237,10 @@ export class CodexNormalizer {
         this.currentTurnId = turnId;
         return [{ ...base(turnId), type: "turn.started" }];
       }
-      case "item/agentMessage/delta":
-        return [{ ...base(p.turnId), type: "text.delta", itemId: String(p.itemId), delta: String(p.delta ?? "") }];
+      case "item/agentMessage/delta": {
+        const phase = this.phases.get(String(p.itemId));
+        return [{ ...base(p.turnId), type: "text.delta", itemId: String(p.itemId), delta: String(p.delta ?? ""), ...(phase ? { phase } : {}) }];
+      }
       case "item/reasoning/textDelta":
       case "item/reasoning/summaryTextDelta":
         return [{ ...base(p.turnId), type: "reasoning.delta", itemId: String(p.itemId), delta: String(p.delta ?? "") }];
@@ -246,6 +272,15 @@ export class CodexNormalizer {
 
   private itemStarted(item: Json, base: { threadId: string; turnId: string; agentId?: string }): AgentEvent[] {
     if (item.type === "subAgentActivity" && item.kind === "started") return this.subagentStarted(base, String(item.agentThreadId), { model: item.model });
+    if (item.type === "agentMessage") {
+      const phase = messagePhase(item.phase);
+      if (phase) remember(this.phases, String(item.id), phase);
+      return [];
+    }
+    if (item.type === "fileChange") {
+      remember(this.proposed, String(item.id), fileChanges(item));
+      return [];
+    }
     const tool = codexTool(item);
     return tool ? [{ ...base, type: "tool.started", itemId: String(item.id), tool }] : [];
   }
@@ -255,14 +290,18 @@ export class CodexNormalizer {
     switch (item.type) {
       case "agentMessage": {
         const text = String(item.text ?? "");
-        if (!agentId && text) this.turnText.set(base.turnId, text);
-        return [{ ...base, type: "text.done", itemId, text }];
+        const phase = messagePhase(item.phase) ?? this.phases.get(itemId);
+        this.phases.delete(itemId);
+        // A progress note is not the turn's reply, even when it is the last message so far.
+        if (!agentId && text && phase !== "commentary") this.turnText.set(base.turnId, text);
+        return [{ ...base, type: "text.done", itemId, text, ...(phase ? { phase } : {}) }];
       }
       case "reasoning": {
         const parts: string[] = [...(item.content ?? []), ...(item.content?.length ? [] : item.summary ?? [])];
         return [{ ...base, type: "reasoning.done", itemId, text: parts.join("\n\n") }];
       }
       case "fileChange":
+        this.proposed.delete(itemId);
         return item.status === "completed" ? [{ ...base, type: "file.changed", itemId, changes: fileChanges(item) }] : [];
       case "contextCompaction":
         return [{ ...base, type: "compacted" }];
@@ -336,11 +375,11 @@ export class CodexNormalizer {
   }
 }
 
-/** The final agent message of a turn payload, if it has one. */
+/** The final agent message of a turn payload that is not a progress note, if it has one. */
 function lastAgentMessage(turn: Json): string | undefined {
   const items: Json[] = Array.isArray(turn.items) ? turn.items : [];
   for (const item of [...items].reverse()) {
-    if (item?.type === "agentMessage" && typeof item.text === "string" && item.text.trim()) return item.text;
+    if (item?.type === "agentMessage" && item.phase !== "commentary" && typeof item.text === "string" && item.text.trim()) return item.text;
   }
   return undefined;
 }
@@ -360,8 +399,15 @@ const LEGACY_DECISIONS = { allow: "approved", "allow-session": "approved_for_ses
 /**
  * Wraps one Codex server request as a neutral `AgentRequest`. Returns undefined
  * for methods that are not questions or approvals (host tool calls and the rest).
+ * `context.proposedChanges` are the changes the approved item announced when it
+ * started; a file-change approval carries them, since its own params do not.
  */
-export function codexRequest(id: number | string, method: string, params: unknown): PendingCodexRequest | undefined {
+export function codexRequest(
+  id: number | string,
+  method: string,
+  params: unknown,
+  context: { proposedChanges?: FileChange[] } = {},
+): PendingCodexRequest | undefined {
   const p = record(params) ?? {};
   let settle!: (value: unknown) => void;
   const response = new Promise<unknown>((resolve) => (settle = resolve));
@@ -383,6 +429,7 @@ export function codexRequest(id: number | string, method: string, params: unknow
       ...(typeof p.command === "string" ? { command: p.command } : {}),
       ...(typeof p.cwd === "string" ? { cwd: p.cwd } : {}),
       ...(typeof p.reason === "string" ? { reason: p.reason } : {}),
+      ...(!command && context.proposedChanges ? { changes: context.proposedChanges } : {}),
       raw: params,
       respond: ({ decision }) => answer({ decision: COMMAND_DECISIONS[decision] }),
     };

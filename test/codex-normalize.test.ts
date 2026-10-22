@@ -187,3 +187,36 @@ test("question and elicitation requests", async () => {
 
   assert.equal(codexRequest(10, "item/tool/call", {}), undefined);
 });
+
+test("agent messages carry their phase, and a progress note is not the turn's reply", () => {
+  const n = normalizer();
+  assert.deepEqual(n.normalize("item/started", { threadId: T, turnId: "turn-1", item: { type: "agentMessage", id: "m1", text: "", phase: "commentary" } }), []);
+  assert.deepEqual(n.normalize("item/agentMessage/delta", { threadId: T, turnId: "turn-1", itemId: "m1", delta: "Looking" }), [
+    { threadId: T, turnId: "turn-1", type: "text.delta", itemId: "m1", delta: "Looking", phase: "commentary" },
+  ]);
+  assert.equal((n.normalize("item/completed", { threadId: T, turnId: "turn-1", item: { type: "agentMessage", id: "m1", text: "Looking", phase: "commentary" } })[0] as any).phase, "commentary");
+  n.normalize("item/started", { threadId: T, turnId: "turn-1", item: { type: "agentMessage", id: "m2", text: "", phase: "final_answer" } });
+  assert.equal((n.normalize("item/agentMessage/delta", { threadId: T, turnId: "turn-1", itemId: "m2", delta: "Done" })[0] as any).phase, "answer");
+  n.normalize("item/completed", { threadId: T, turnId: "turn-1", item: { type: "agentMessage", id: "m2", text: "Done", phase: "final_answer" } });
+  // A note after the answer still leaves the answer as the turn's text.
+  n.normalize("item/completed", { threadId: T, turnId: "turn-1", item: { type: "agentMessage", id: "m3", text: "Tidying up", phase: "commentary" } });
+  const completed = n.normalize("turn/completed", { threadId: T, turn: { id: "turn-1", status: "completed", items: [], error: null } });
+  assert.equal((completed[0] as any).text, "Done");
+  // Without phases, as older Codex sends them, text events leave it out.
+  assert.equal("phase" in n.normalize("item/agentMessage/delta", { threadId: T, turnId: "turn-1", itemId: "m4", delta: "x" })[0], false);
+});
+
+test("a file-change approval carries the changes its item announced", async () => {
+  const n = normalizer();
+  assert.deepEqual(n.normalize("item/started", {
+    threadId: T, turnId: "turn-1",
+    item: { type: "fileChange", id: "f1", status: "inProgress", changes: [{ path: "/tmp/a.txt", kind: { type: "update" }, diff: "-a\n+b" }] },
+  }), []);
+  const files = codexRequest(11, "item/fileChange/requestApproval", { threadId: T, turnId: "turn-1", itemId: "f1" }, { proposedChanges: n.proposedChanges("f1") })!;
+  assert.deepEqual((files.request as any).changes, [{ path: "/tmp/a.txt", kind: "update", diff: "-a\n+b" }]);
+  // A command approval never carries file changes.
+  const command = codexRequest(12, "item/commandExecution/requestApproval", { threadId: T, turnId: "turn-1", itemId: "c", command: "ls" }, { proposedChanges: [] })!;
+  assert.equal("changes" in command.request, false);
+  n.normalize("item/completed", { threadId: T, turnId: "turn-1", item: { type: "fileChange", id: "f1", status: "completed", changes: [] } });
+  assert.equal(n.proposedChanges("f1"), undefined);
+});

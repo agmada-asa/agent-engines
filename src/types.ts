@@ -134,6 +134,11 @@ export interface CodexThreadOptions {
   dynamicTools?: Array<{ name: string; description: string; inputSchema: unknown }>;
   /** Not written to disk; cannot be resumed. */
   ephemeral?: boolean;
+  /**
+   * Who answers approval requests. Set `user` to keep them coming to the host
+   * even when the operator's config routes them to Codex's own reviewer.
+   */
+  approvalsReviewer?: "user" | "auto_review" | "guardian_subagent";
   /** Replaces Codex's base instructions entirely. */
   baseInstructions?: string;
 }
@@ -297,6 +302,13 @@ export interface FileChange {
   diff?: string;
 }
 
+/**
+ * What an agent message is for, when the runtime says (Codex): `commentary` is a
+ * progress note between tool calls, `answer` is the reply itself. Claude does
+ * not mark its messages, so its text events leave it out.
+ */
+export type MessagePhase = "commentary" | "answer";
+
 /** Fields every event has. `agentId` is set on events from a subagent. */
 interface EventBase {
   threadId: string;
@@ -309,8 +321,8 @@ interface EventBase {
 export type AgentEvent = EventBase &
   (
     | { type: "turn.started" }
-    | { type: "text.delta"; itemId: string; delta: string }
-    | { type: "text.done"; itemId: string; text: string }
+    | { type: "text.delta"; itemId: string; delta: string; phase?: MessagePhase }
+    | { type: "text.done"; itemId: string; text: string; phase?: MessagePhase }
     | { type: "reasoning.delta"; itemId: string; delta: string }
     | { type: "reasoning.done"; itemId: string; text: string }
     | { type: "tool.started"; itemId: string; tool: ToolCall }
@@ -344,6 +356,11 @@ export interface ApprovalRequest {
   tool?: string;
   input?: unknown;
   reason?: string;
+  /**
+   * For `file-change`: the changes waiting on this approval, when the runtime
+   * announced them before asking (Codex sends them on the item it is approving).
+   */
+  changes?: FileChange[];
   /** The runtime's own request, for anything not normalised. */
   raw: unknown;
   respond(decision: { decision: "allow" | "allow-session" | "deny" | "cancel"; message?: string }): Promise<void>;

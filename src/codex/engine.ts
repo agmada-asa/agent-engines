@@ -442,6 +442,7 @@ class CodexThread implements Thread {
       ...threadAccess(options.access),
       ...(options.codex?.approvalPolicy ? { approvalPolicy: options.codex.approvalPolicy } : {}),
       ...(options.codex?.sandbox ? { sandbox: options.codex.sandbox } : {}),
+      ...(options.codex?.approvalsReviewer ? { approvalsReviewer: options.codex.approvalsReviewer } : {}),
       ...(Object.keys(config).length ? { config: config as ThreadStartParams["config"] } : {}),
       ...(options.instructions ? { developerInstructions: options.instructions } : {}),
       ...(options.codex?.baseInstructions ? { baseInstructions: options.codex.baseInstructions } : {}),
@@ -549,7 +550,7 @@ class CodexThread implements Thread {
 
   /** @internal Surfaces one server request and waits for the consumer's answer. */
   async request(id: number | string, method: string, params: unknown): Promise<unknown> {
-    const pending = codexRequest(id, method, params);
+    const pending = codexRequest(id, method, params, { proposedChanges: this.normalizer.proposedChanges((params as { itemId?: unknown })?.itemId) });
     if (!pending) return undefined;
     this.pendingRequests.set(pending.request.id, pending);
     const turnId = String((params as { turnId?: unknown })?.turnId ?? this.normalizer.currentTurnId);

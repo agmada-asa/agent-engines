@@ -99,6 +99,8 @@ export const CODEX_PROTOCOL_CONTRACT = {
     CollabAgentTool: ["spawnAgent"],
     CollabAgentStatus: ["completed", "errored", "shutdown", "interrupted"],
     SubAgentActivityKind: ["started", "completed", "interrupted"],
+    MessagePhase: ["commentary", "final_answer", "partial_answer"],
+    ApprovalsReviewer: ["user", "auto_review", "guardian_subagent"],
   },
 } as const;
 
