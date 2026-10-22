@@ -74,8 +74,8 @@ export interface ClaudeEngineOptions {
   sdk?: ClaudeSdk;
   /** Claude Code executable; defaults to the binary the SDK bundles. */
   executable?: string;
-  /** Base environment for every Claude Code process; defaults to the current one. */
-  env?: NodeJS.ProcessEnv;
+  /** Base environment for every Claude Code process; defaults to the current one. A plain record, so apps whose `ProcessEnv` requires keys (Next.js) can pass one. */
+  env?: Readonly<Record<string, string | undefined>>;
   /**
    * Refuse to run unless Claude is signed in with a Claude subscription, and strip
    * API-key variables from the child, so turns never bill per token. Defaults to true.

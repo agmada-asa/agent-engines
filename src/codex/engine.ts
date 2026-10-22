@@ -80,7 +80,7 @@ export interface CodexEngineOptions {
   /** Absolute working directory of the app-server process; defaults to the home directory. Threads set their own. */
   cwd?: string;
   /** Environment for the app-server and the commands it runs; defaults to the current one. */
-  env?: NodeJS.ProcessEnv;
+  env?: Readonly<Record<string, string | undefined>>;
   /** Process-wide launch flags: disabled features, `--config` overrides. */
   launch?: CodexLaunchOptions;
   /**

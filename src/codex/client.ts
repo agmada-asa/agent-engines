@@ -101,7 +101,7 @@ export interface CodexClientOptions {
   /** Codex executable; defaults to `codex` on PATH. */
   executable?: string;
   /** Child environment; defaults to the current environment. */
-  env?: NodeJS.ProcessEnv;
+  env?: Readonly<Record<string, string | undefined>>;
   launch?: CodexLaunchOptions;
   /** Answers server requests; without one, approvals are declined and the rest refused. */
   onServerRequest?: CodexServerRequestHandler;
