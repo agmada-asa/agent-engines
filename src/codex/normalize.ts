@@ -13,7 +13,9 @@ import type {
   AgentRequest,
   FileChange,
   MessagePhase,
+  PlanStep,
   RateLimit,
+  RuntimeStatus,
   TokenUsage,
   ToolCall,
   TurnError,
@@ -172,6 +174,26 @@ function messagePhase(phase: unknown): MessagePhase | undefined {
   return undefined;
 }
 
+/** Codex plan steps in the neutral shape. */
+function planSteps(plan: unknown): PlanStep[] {
+  return (Array.isArray(plan) ? plan : []).map((entry: Json) => ({
+    step: String(entry?.step ?? ""),
+    status: entry?.status === "completed" ? "completed" : entry?.status === "inProgress" ? "in-progress" : "pending",
+  }));
+}
+
+/** A Codex thread status as a runtime status; undefined for states with no neutral meaning (not loaded, system error). */
+function threadStatus(status: Json | undefined): RuntimeStatus | undefined {
+  if (status?.type === "idle") return { state: "idle" };
+  if (status?.type !== "active") return undefined;
+  const waitingOn: Array<"approval" | "input"> = [];
+  for (const flag of Array.isArray(status.activeFlags) ? status.activeFlags : []) {
+    if (flag === "waitingOnApproval") waitingOn.push("approval");
+    else if (flag === "waitingOnUserInput") waitingOn.push("input");
+  }
+  return waitingOn.length ? { state: "waiting", waitingOn } : { state: "working" };
+}
+
 /** Most items of each kind remembered from `item/started` (agent message phases, proposed file changes). */
 const MAX_REMEMBERED_ITEMS = 256;
 
@@ -244,6 +266,29 @@ export class CodexNormalizer {
       case "item/reasoning/textDelta":
       case "item/reasoning/summaryTextDelta":
         return [{ ...base(p.turnId), type: "reasoning.delta", itemId: String(p.itemId), delta: String(p.delta ?? "") }];
+      case "item/commandExecution/outputDelta":
+        return [{ ...base(p.turnId), type: "tool.output.delta", itemId: String(p.itemId), delta: String(p.delta ?? "") }];
+      case "item/mcpToolCall/progress":
+        return [{ ...base(p.turnId), type: "tool.progress", itemId: String(p.itemId), ...(typeof p.message === "string" ? { message: p.message } : {}) }];
+      case "item/plan/delta":
+        return [{ ...base(p.turnId), type: "plan.proposal.delta", itemId: String(p.itemId), delta: String(p.delta ?? "") }];
+      case "item/fileChange/patchUpdated":
+        // The patch grew while streaming; keep the approval's proposed changes current.
+        remember(this.proposed, String(p.itemId), fileChanges(p));
+        return [];
+      case "turn/plan/updated":
+        return [{
+          ...base(p.turnId),
+          type: "plan.updated",
+          steps: planSteps(p.plan),
+          ...(typeof p.explanation === "string" && p.explanation ? { explanation: p.explanation } : {}),
+        }];
+      case "turn/diff/updated":
+        return [{ ...base(p.turnId), type: "diff.updated", diff: String(p.diff ?? "") }];
+      case "thread/status/changed": {
+        const status = threadStatus(record(p.status));
+        return status ? [{ ...base(), type: "status", status }] : [];
+      }
       case "item/started":
         return this.itemStarted(record(p.item) ?? {}, base(p.turnId));
       case "item/completed":
@@ -259,10 +304,15 @@ export class CodexNormalizer {
         return [{ ...base(p.turnId), type: "model.rerouted", from: String(p.fromModel), to: String(p.toModel) }];
       case "serverRequest/resolved":
         return [{ ...base(), type: "request.resolved", requestId: String(p.requestId) }];
-      case "error":
+      case "error": {
         // A retried error is not the turn's outcome; the final one arrives with turn/completed.
-        if (!agentId && p.willRetry !== true && typeof p.turnId === "string") this.turnErrors.set(p.turnId, record(p.error) ?? {});
+        if (p.willRetry === true) {
+          const message = record(p.error)?.message;
+          return [{ ...base(p.turnId), type: "status", status: { state: "retrying", ...(typeof message === "string" && message ? { retry: { message } } : {}) } }];
+        }
+        if (!agentId && typeof p.turnId === "string") this.turnErrors.set(p.turnId, record(p.error) ?? {});
         return [];
+      }
       case "turn/completed":
         return agentId ? [] : this.turnCompleted(record(p.turn) ?? {});
       default:
@@ -281,6 +331,7 @@ export class CodexNormalizer {
       remember(this.proposed, String(item.id), fileChanges(item));
       return [];
     }
+    if (item.type === "contextCompaction") return [{ ...base, type: "status", status: { state: "compacting" } }];
     const tool = codexTool(item);
     return tool ? [{ ...base, type: "tool.started", itemId: String(item.id), tool }] : [];
   }
@@ -305,6 +356,8 @@ export class CodexNormalizer {
         return item.status === "completed" ? [{ ...base, type: "file.changed", itemId, changes: fileChanges(item) }] : [];
       case "contextCompaction":
         return [{ ...base, type: "compacted" }];
+      case "plan":
+        return [{ ...base, type: "plan.proposal.done", itemId, text: String(item.text ?? "") }];
       case "subAgentActivity":
         if (item.kind === "completed" || item.kind === "interrupted") {
           return this.subagentEnded(base, String(item.agentThreadId), item.kind === "completed" ? "completed" : "stopped");

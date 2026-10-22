@@ -342,3 +342,40 @@ test("interruptTurn stops the active turn by ID and ignores any other", async ()
   assert.equal((await turn.result).status, "interrupted");
   await engine.close();
 });
+
+test("tool progress and plans stream in the turn; a background task ending later reaches subscribers", async () => {
+  const { sdk, queries } = fakeClaudeSdk({
+    onUser: (_message, query) => {
+      const [init, start, blockStart, delta, assistant, result] = replyMessages("Started the build");
+      for (const message of [init, start, blockStart, delta]) query.emit(message);
+      query.emit({ type: "system", subtype: "status", status: "requesting" });
+      query.emit({ type: "assistant", parent_tool_use_id: null, message: { id: "msg_tools", role: "assistant", content: [
+        { type: "tool_use", id: "todo", name: "TodoWrite", input: { todos: [{ content: "Build", status: "in_progress", activeForm: "Building" }] } },
+        { type: "tool_use", id: "bash", name: "Bash", input: { command: "npm run build", run_in_background: true } },
+      ] } });
+      query.emit({ type: "tool_progress", tool_use_id: "bash", tool_name: "Bash", parent_tool_use_id: null, elapsed_time_seconds: 2 });
+      query.emit({ type: "system", subtype: "task_started", task_id: "bg-1", tool_use_id: "bash", description: "npm run build", task_type: "local_bash", is_backgrounded: true });
+      query.emit(assistant);
+      query.emit(result);
+    },
+  });
+  const engine = new ClaudeEngine({ sdk });
+  const thread = await engine.startThread({ cwd: "/tmp", model: "claude-haiku-5-5" });
+  const seen: AgentEvent[] = [];
+  thread.subscribe((event) => seen.push(event));
+  const turn = thread.run("Build it in the background");
+  const events = await collect(turn);
+  assert.deepEqual(events.map((event) => event.type), [
+    "turn.started", "text.delta", "status", "tool.started", "plan.updated", "tool.started", "tool.progress", "task.started", "text.done", "turn.completed",
+  ]);
+  assert.equal((await turn.result).text, "Started the build");
+
+  // The shell finishes after the turn: no turn is running, so only subscribers hear about it.
+  queries[0].emit({ type: "system", subtype: "task_notification", task_id: "bg-1", tool_use_id: "bash", status: "completed", output_file: "/tmp/bg-1.log", summary: "Build passed" });
+  await until(() => seen.at(-1)?.type === "task.ended");
+  assert.deepEqual(seen.at(-1), {
+    threadId: thread.id, turnId: "", type: "task.ended", taskId: "bg-1", status: "completed", summary: "Build passed", outputFile: "/tmp/bg-1.log",
+  });
+  assert.equal(thread.activeTurn, undefined);
+  await engine.close();
+});

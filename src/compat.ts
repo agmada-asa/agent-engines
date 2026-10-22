@@ -70,6 +70,13 @@ export const CODEX_PROTOCOL_CONTRACT = {
     "account/rateLimits/updated",
     "model/rerouted",
     "serverRequest/resolved",
+    "item/commandExecution/outputDelta",
+    "item/mcpToolCall/progress",
+    "item/plan/delta",
+    "item/fileChange/patchUpdated",
+    "turn/plan/updated",
+    "turn/diff/updated",
+    "thread/status/changed",
   ],
   serverRequests: [
     "item/commandExecution/requestApproval",
@@ -93,6 +100,7 @@ export const CODEX_PROTOCOL_CONTRACT = {
       "subAgentActivity",
       "webSearch",
       "contextCompaction",
+      "plan",
     ],
     TurnStatus: ["completed", "failed", "interrupted", "inProgress"],
     CodexErrorInfo: ["usageLimitExceeded", "rateLimitExceeded", "serverOverloaded", "contextWindowExceeded", "unauthorized"],
@@ -101,6 +109,9 @@ export const CODEX_PROTOCOL_CONTRACT = {
     SubAgentActivityKind: ["started", "completed", "interrupted"],
     MessagePhase: ["commentary", "final_answer", "partial_answer"],
     ApprovalsReviewer: ["user", "auto_review", "guardian_subagent"],
+    TurnPlanStepStatus: ["pending", "inProgress", "completed"],
+    ThreadStatus: ["idle", "active"],
+    ThreadActiveFlag: ["waitingOnApproval", "waitingOnUserInput"],
   },
 } as const;
 

@@ -73,7 +73,8 @@ test("subagents: task events and their messages tagged with the task ID", () => 
   const tagged = n.normalize(msg({ type: "assistant", parent_tool_use_id: null, agent_id: "agent-7", message: { id: "sm2", content: [{ type: "text", text: "x" }] } }), "t");
   assert.equal(tagged[0].agentId, "agent-7");
   const shell = n.normalize(msg({ type: "system", subtype: "task_started", task_id: "sh", description: "npm test", task_type: "local_bash" }), "t");
-  assert.deepEqual(shell, []);
+  // A shell is a task, not a subagent.
+  assert.deepEqual(shell.map((event) => event.type), ["task.started"]);
   const ended = n.normalize(msg({ type: "system", subtype: "task_notification", task_id: "agent-7", status: "completed", summary: "Found the file", output_file: "" }), "t");
   assert.deepEqual(ended, [{ threadId: S, turnId: "t", type: "subagent.ended", subagentId: "agent-7", status: "completed", summary: "Found the file" }]);
   assert.deepEqual(n.subagentIds, ["agent-7"]);
@@ -122,4 +123,81 @@ test("claudeTranscript pairs tool calls with results", () => {
     { kind: "tool", tool: { kind: "builtin", name: "Read", input: { file_path: "/a" } }, output: "contents" },
     { kind: "message", role: "assistant", text: "Report" },
   ]);
+});
+
+test("tool progress, including a subagent's", () => {
+  const n = new ClaudeNormalizer(S);
+  assert.deepEqual(n.normalize(msg({ type: "tool_progress", tool_use_id: "b1", tool_name: "Bash", parent_tool_use_id: null, elapsed_time_seconds: 12 }), "t"), [
+    { threadId: S, turnId: "t", type: "tool.progress", itemId: "b1", elapsedSeconds: 12 },
+  ]);
+  n.normalize(msg({ type: "system", subtype: "task_started", task_id: "task-a", tool_use_id: "agent-call", description: "Explore", task_type: "local_agent" }), "t");
+  const nested = n.normalize(msg({ type: "tool_progress", tool_use_id: "b2", tool_name: "Bash", parent_tool_use_id: "agent-call", elapsed_time_seconds: 3 }), "t");
+  assert.equal(nested[0].agentId, "task-a");
+});
+
+test("TodoWrite becomes a plan update alongside its tool call", () => {
+  const n = new ClaudeNormalizer(S);
+  const events = n.normalize(msg({ type: "assistant", parent_tool_use_id: null, message: { id: "m", content: [{
+    type: "tool_use", id: "todo1", name: "TodoWrite", input: { todos: [
+      { content: "Read the code", status: "completed", activeForm: "Reading the code" },
+      { content: "Fix the bug", status: "in_progress", activeForm: "Fixing the bug" },
+      { content: "Run tests", status: "pending", activeForm: "Running tests" },
+    ] },
+  }] } }), "t");
+  assert.deepEqual(events.map((event) => event.type), ["tool.started", "plan.updated"]);
+  assert.deepEqual(events[1], {
+    threadId: S, turnId: "t", type: "plan.updated", itemId: "todo1",
+    steps: [{ step: "Read the code", status: "completed" }, { step: "Fix the bug", status: "in-progress" }, { step: "Run tests", status: "pending" }],
+  });
+  const malformed = n.normalize(msg({ type: "assistant", parent_tool_use_id: null, message: { id: "m2", content: [{ type: "tool_use", id: "todo2", name: "TodoWrite", input: {} }] } }), "t");
+  assert.deepEqual(malformed.map((event) => event.type), ["tool.started"]);
+});
+
+test("background tasks that are not subagents get their own lifecycle", () => {
+  const n = new ClaudeNormalizer(S);
+  const started = n.normalize(msg({ type: "system", subtype: "task_started", task_id: "bash-1", tool_use_id: "b1", description: "npm run build", task_type: "local_bash", is_backgrounded: true }), "t");
+  assert.deepEqual(started, [{ threadId: S, turnId: "t", type: "task.started", taskId: "bash-1", kind: "shell", description: "npm run build", itemId: "b1", background: true }]);
+  assert.deepEqual(n.subagentIds, []);
+  assert.deepEqual(n.normalize(msg({ type: "system", subtype: "task_updated", task_id: "bash-1", patch: { status: "running" } }), "t"), [
+    { threadId: S, turnId: "t", type: "task.progress", taskId: "bash-1", status: "running" },
+  ]);
+  assert.deepEqual(n.normalize(msg({ type: "system", subtype: "task_updated", task_id: "bash-1", patch: {} }), "t"), []);
+  const ended = n.normalize(msg({ type: "system", subtype: "task_notification", task_id: "bash-1", status: "failed", output_file: "/tmp/out.log", summary: "Build failed" }), "");
+  assert.deepEqual(ended, [{ threadId: S, turnId: "", type: "task.ended", taskId: "bash-1", status: "failed", summary: "Build failed", outputFile: "/tmp/out.log" }]);
+  assert.deepEqual(n.normalize(msg({ type: "system", subtype: "task_notification", task_id: "bash-1", status: "failed", output_file: "", summary: "" }), ""), []);
+  // Unknown task types keep their own name.
+  assert.equal((n.normalize(msg({ type: "system", subtype: "task_started", task_id: "w", description: "watch", task_type: "monitor" }), "t")[0] as any).kind, "monitor");
+});
+
+test("subagents keep subagent events, report progress as tasks, and own the tasks they launch", () => {
+  const n = new ClaudeNormalizer(S);
+  const started = n.normalize(msg({ type: "system", subtype: "task_started", task_id: "agent-1", tool_use_id: "call-1", description: "Explore", task_type: "local_agent", subagent_type: "Explore" }), "t");
+  assert.deepEqual(started.map((event) => event.type), ["subagent.started"]);
+  const progress = n.normalize(msg({
+    type: "system", subtype: "task_progress", task_id: "agent-1", description: "Explore", summary: "Reading the parser",
+    last_tool_name: "Grep", usage: { total_tokens: 1200, tool_uses: 4, duration_ms: 9000 },
+  }), "t");
+  assert.deepEqual(progress, [{
+    threadId: S, turnId: "t", type: "task.progress", taskId: "agent-1", description: "Explore", summary: "Reading the parser",
+    lastTool: "Grep", usage: { totalTokens: 1200, toolUses: 4, durationMs: 9000 },
+  }]);
+  const child = n.normalize(msg({ type: "system", subtype: "task_started", task_id: "bash-2", description: "tests", task_type: "local_bash", parent_task_id: "agent-1" }), "t");
+  assert.equal(child[0].agentId, "agent-1");
+  assert.deepEqual(n.normalize(msg({ type: "system", subtype: "task_updated", task_id: "agent-1", patch: { status: "killed", is_backgrounded: true } }), "t"), [
+    { threadId: S, turnId: "t", type: "task.progress", taskId: "agent-1", status: "stopped", background: true },
+  ]);
+  const ended = n.normalize(msg({ type: "system", subtype: "task_notification", task_id: "agent-1", status: "completed", output_file: "", summary: "Done" }), "t");
+  assert.deepEqual(ended.map((event) => event.type), ["subagent.ended"]);
+});
+
+test("runtime status, retries and session state", () => {
+  const n = new ClaudeNormalizer(S);
+  assert.deepEqual(n.normalize(msg({ type: "system", subtype: "status", status: "requesting" }), "t"), [{ threadId: S, turnId: "t", type: "status", status: { state: "working" } }]);
+  assert.deepEqual(n.normalize(msg({ type: "system", subtype: "status", status: "compacting" }), "t")[0], { threadId: S, turnId: "t", type: "status", status: { state: "compacting" } });
+  assert.deepEqual(n.normalize(msg({ type: "system", subtype: "status", status: null }), "t"), []);
+  assert.deepEqual(n.normalize(msg({ type: "system", subtype: "api_retry", attempt: 2, max_retries: 10, retry_delay_ms: 4000, error_status: 529, error: "overloaded" }), "t"), [{
+    threadId: S, turnId: "t", type: "status", status: { state: "retrying", retry: { attempt: 2, maxAttempts: 10, delayMs: 4000, message: "overloaded (HTTP 529)" } },
+  }]);
+  assert.deepEqual(n.normalize(msg({ type: "system", subtype: "session_state_changed", state: "requires_action" }), "t")[0], { threadId: S, turnId: "t", type: "status", status: { state: "waiting" } });
+  assert.deepEqual(n.normalize(msg({ type: "system", subtype: "session_state_changed", state: "idle" }), "")[0], { threadId: S, turnId: "", type: "status", status: { state: "idle" } });
 });

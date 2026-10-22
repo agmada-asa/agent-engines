@@ -6,10 +6,24 @@
  * Subagents (the Agent/Task tool) are tracked by task ID: `task_started` and
  * `task_notification` mark their lifetime, and their own messages, which carry
  * `parent_tool_use_id` or `agent_id`, are tagged with that ID as `agentId`.
+ * Other tasks (background shells, monitors, workflows, MCP tasks) surface as
+ * `task.*` events, and `task_progress` reports progress on either kind.
  */
 
 import type { ModelUsage, SDKMessage } from "@anthropic-ai/claude-agent-sdk";
-import type { AgentEvent, FileChange, RateLimit, TokenUsage, ToolCall, TranscriptEntry, TurnError } from "../types.ts";
+import type {
+  AgentEvent,
+  FileChange,
+  PlanStep,
+  RateLimit,
+  RuntimeStatus,
+  TaskStatus,
+  TaskUsage,
+  TokenUsage,
+  ToolCall,
+  TranscriptEntry,
+  TurnError,
+} from "../types.ts";
 
 type Json = Record<string, any>;
 
@@ -72,6 +86,31 @@ export function claudeTool(name: string, input: unknown): ToolCall {
   return { kind: "builtin", name, input };
 }
 
+/** TodoWrite's list as plan steps; undefined when the input is not a list. */
+function todoSteps(input: unknown): PlanStep[] | undefined {
+  const todos = record(input)?.todos;
+  if (!Array.isArray(todos)) return undefined;
+  return todos.map((todo: Json) => ({
+    step: String(todo?.content ?? ""),
+    status: todo?.status === "completed" ? "completed" : todo?.status === "in_progress" ? "in-progress" : "pending",
+  }));
+}
+
+/** Friendly names for the task types the SDK documents; anything else keeps its own name. */
+const TASK_KINDS: Readonly<Record<string, string>> = { local_bash: "shell", local_workflow: "workflow", mcp_task: "mcp" };
+
+/** A task's usage counters in the neutral shape. */
+function taskUsage(usage: Json | undefined): TaskUsage | undefined {
+  if (!usage) return undefined;
+  return { totalTokens: Number(usage.total_tokens ?? 0), toolUses: Number(usage.tool_uses ?? 0), durationMs: Number(usage.duration_ms ?? 0) };
+}
+
+/** A `task_updated` status in the neutral shape. */
+function taskStatus(status: unknown): TaskStatus | undefined {
+  if (status === "killed") return "stopped";
+  return status === "pending" || status === "running" || status === "paused" || status === "completed" || status === "failed" ? status : undefined;
+}
+
 /** Text of a tool_result block's content. */
 function resultText(content: unknown): string | undefined {
   if (typeof content === "string") return content;
@@ -113,6 +152,9 @@ export class ClaudeNormalizer {
   private readonly taskByToolUse = new Map<string, string>();
   private readonly subagents = new Set<string>();
   private readonly endedSubagents = new Set<string>();
+  /** Non-agent tasks seen so far, and those that have ended. */
+  private readonly tasks = new Set<string>();
+  private readonly endedTasks = new Set<string>();
   /** message id → block index → item id, for streamed blocks. */
   private readonly streamBlocks = new Map<string, Map<number, string>>();
   /** message id → block type → count, so streamed and whole blocks get the same item IDs. */
@@ -152,6 +194,13 @@ export class ClaudeNormalizer {
         this.lastLimit = limit;
         return [{ threadId: this.threadId, turnId, type: "rate-limit", limit }];
       }
+      case "tool_progress":
+        return [{
+          ...base,
+          type: "tool.progress",
+          itemId: String(m.tool_use_id),
+          ...(typeof m.elapsed_time_seconds === "number" ? { elapsedSeconds: m.elapsed_time_seconds } : {}),
+        }];
       case "system":
         return this.system(m, { threadId: this.threadId, turnId });
       default:
@@ -207,6 +256,8 @@ export class ClaudeNormalizer {
         const tool = claudeTool(name, block.input);
         this.tools.set(String(block.id), tool);
         events.push({ ...base, type: "tool.started", itemId: String(block.id), tool });
+        const steps = name === "TodoWrite" ? todoSteps(block.input) : undefined;
+        if (steps) events.push({ ...base, type: "plan.updated", steps, itemId: String(block.id) });
       }
     }
     return events;
@@ -234,9 +285,9 @@ export class ClaudeNormalizer {
   private system(m: Json, base: { threadId: string; turnId: string }): AgentEvent[] {
     switch (m.subtype) {
       case "task_started": {
-        // Shell and monitor tasks are tasks too; only agents are subagents.
-        if (m.task_type && m.task_type !== "local_agent" && !m.subagent_type) return [];
         const id = String(m.task_id);
+        // Shell and monitor tasks are tasks too; only agents are subagents.
+        if (m.task_type && m.task_type !== "local_agent" && !m.subagent_type) return this.taskStarted(m, base, id);
         if (typeof m.tool_use_id === "string") this.taskByToolUse.set(m.tool_use_id, id);
         if (this.subagents.has(id)) return [];
         this.subagents.add(id);
@@ -248,8 +299,32 @@ export class ClaudeNormalizer {
           ...(typeof m.prompt === "string" ? { prompt: m.prompt } : {}),
         }];
       }
+      case "task_progress": {
+        const usage = taskUsage(record(m.usage));
+        return [{
+          ...base,
+          type: "task.progress",
+          taskId: String(m.task_id),
+          ...(typeof m.description === "string" && m.description ? { description: m.description } : {}),
+          ...(typeof m.summary === "string" && m.summary ? { summary: m.summary } : {}),
+          ...(typeof m.last_tool_name === "string" ? { lastTool: m.last_tool_name } : {}),
+          ...(usage ? { usage } : {}),
+        }];
+      }
+      case "task_updated": {
+        const patch = record(m.patch) ?? {};
+        const status = taskStatus(patch.status);
+        const update = {
+          ...(status ? { status } : {}),
+          ...(typeof patch.description === "string" && patch.description ? { description: patch.description } : {}),
+          ...(typeof patch.is_backgrounded === "boolean" ? { background: patch.is_backgrounded } : {}),
+          ...(typeof patch.error === "string" && patch.error ? { error: patch.error } : {}),
+        };
+        return Object.keys(update).length ? [{ ...base, type: "task.progress", taskId: String(m.task_id), ...update }] : [];
+      }
       case "task_notification": {
         const id = String(m.task_id);
+        if (this.tasks.has(id)) return this.taskEnded(m, base, id);
         if (!this.subagents.has(id) || this.endedSubagents.has(id)) return [];
         this.endedSubagents.add(id);
         const status = m.status === "completed" ? "completed" : m.status === "failed" ? "failed" : "stopped";
@@ -264,11 +339,61 @@ export class ClaudeNormalizer {
           ...(typeof meta.post_tokens === "number" ? { afterTokens: meta.post_tokens } : {}),
         }];
       }
+      case "status":
+        if (m.status === "requesting") return [{ ...base, type: "status", status: { state: "working" } }];
+        if (m.status === "compacting") return [{ ...base, type: "status", status: { state: "compacting" } }];
+        return [];
+      case "api_retry": {
+        const retry: NonNullable<RuntimeStatus["retry"]> = {
+          ...(typeof m.attempt === "number" ? { attempt: m.attempt } : {}),
+          ...(typeof m.max_retries === "number" ? { maxAttempts: m.max_retries } : {}),
+          ...(typeof m.retry_delay_ms === "number" ? { delayMs: m.retry_delay_ms } : {}),
+          ...(typeof m.error === "string" ? { message: typeof m.error_status === "number" ? `${m.error} (HTTP ${m.error_status})` : m.error } : {}),
+        };
+        return [{ ...base, type: "status", status: { state: "retrying", retry } }];
+      }
+      case "session_state_changed": {
+        // Only sent when the session opts in to state events; mapped when it arrives.
+        const state = m.state === "idle" ? "idle" : m.state === "requires_action" ? "waiting" : m.state === "running" ? "working" : undefined;
+        return state ? [{ ...base, type: "status", status: { state } }] : [];
+      }
       case "model_refusal_fallback":
         return [{ ...base, type: "model.rerouted", from: String(m.original_model), to: String(m.fallback_model) }];
       default:
         return [];
     }
+  }
+
+  private taskStarted(m: Json, base: { threadId: string; turnId: string }, id: string): AgentEvent[] {
+    if (this.tasks.has(id)) return [];
+    this.tasks.add(id);
+    // A task a subagent launched belongs to that subagent's events.
+    const parent = typeof m.parent_task_id === "string" && this.subagents.has(m.parent_task_id) ? m.parent_task_id : undefined;
+    return [{
+      ...base,
+      ...(parent ? { agentId: parent } : {}),
+      type: "task.started",
+      taskId: id,
+      kind: TASK_KINDS[m.task_type] ?? String(m.task_type),
+      description: String(m.description ?? ""),
+      ...(typeof m.tool_use_id === "string" ? { itemId: m.tool_use_id } : {}),
+      ...(typeof m.is_backgrounded === "boolean" ? { background: m.is_backgrounded } : {}),
+    }];
+  }
+
+  private taskEnded(m: Json, base: { threadId: string; turnId: string }, id: string): AgentEvent[] {
+    if (this.endedTasks.has(id)) return [];
+    this.endedTasks.add(id);
+    const usage = taskUsage(record(m.usage));
+    return [{
+      ...base,
+      type: "task.ended",
+      taskId: id,
+      status: m.status === "completed" ? "completed" : m.status === "failed" ? "failed" : "stopped",
+      ...(typeof m.summary === "string" && m.summary ? { summary: m.summary } : {}),
+      ...(typeof m.output_file === "string" && m.output_file ? { outputFile: m.output_file } : {}),
+      ...(usage ? { usage } : {}),
+    }];
   }
 
   private itemId(counts: Map<string, Map<string, number>>, messageId: string, type: string): string {

@@ -371,3 +371,38 @@ test("interruptTurn stops a turn by ID that this thread object did not start", a
   assert.deepEqual(children[0].requests("turn/interrupt")[0], { threadId: "saved", turnId: "turn-from-before" });
   await engine.close();
 });
+
+test("live progress reaches the turn, and the reply text stays the final answer", async () => {
+  const { spawn, children } = fakeSpawner(handlers());
+  const engine = new CodexEngine({ spawnProcess: spawn });
+  const thread = await engine.startThread({ cwd: "/tmp" });
+  const seen: AgentEvent[] = [];
+  thread.subscribe((event) => seen.push(event));
+  const turn = thread.run("Build it");
+  const events = collect(turn);
+  await turn.id;
+  await until(() => thread.activeTurn !== undefined);
+  const server = children[0];
+  server.notify("thread/status/changed", { threadId: THREAD, status: { type: "active", activeFlags: [] } });
+  server.notify("turn/plan/updated", { threadId: THREAD, turnId: "turn-1", explanation: null, plan: [{ step: "Build", status: "inProgress" }] });
+  server.notify("item/completed", { threadId: THREAD, turnId: "turn-1", item: { type: "agentMessage", id: "c", text: "Building now.", phase: "commentary" } });
+  server.notify("item/started", { threadId: THREAD, turnId: "turn-1", item: { type: "commandExecution", id: "cmd", command: "npm run build", cwd: "/tmp", status: "inProgress" } });
+  server.notify("item/commandExecution/outputDelta", { threadId: THREAD, turnId: "turn-1", itemId: "cmd", delta: "> tsc\n" });
+  server.notify("item/commandExecution/outputDelta", { threadId: THREAD, turnId: "turn-1", itemId: "cmd", delta: "done\n" });
+  server.notify("item/completed", { threadId: THREAD, turnId: "turn-1", item: { type: "commandExecution", id: "cmd", command: "npm run build", cwd: "/tmp", status: "completed", aggregatedOutput: "> tsc\ndone\n", exitCode: 0 } });
+  server.notify("turn/diff/updated", { threadId: THREAD, turnId: "turn-1", diff: "diff --git a/x b/x\n" });
+  server.notify("item/completed", { threadId: THREAD, turnId: "turn-1", item: { type: "agentMessage", id: "a", text: "Built.", phase: "final_answer" } });
+  server.notify("turn/completed", { threadId: THREAD, turn: { id: "turn-1", status: "completed", items: [], error: null } });
+  server.notify("thread/status/changed", { threadId: THREAD, status: { type: "idle" } });
+  const result = await turn.result;
+  assert.equal(result.text, "Built.");
+  const types = (await events).map((event) => event.type);
+  assert.deepEqual(types, [
+    "turn.started", "status", "plan.updated", "text.done", "tool.started", "tool.output.delta", "tool.output.delta",
+    "tool.completed", "diff.updated", "text.done", "turn.completed",
+  ]);
+  // The idle status arrives after the turn, so only thread subscribers see it.
+  await until(() => seen.at(-1)?.type === "status");
+  assert.deepEqual(seen.at(-1), { threadId: THREAD, turnId: "", type: "status", status: { state: "idle" } });
+  await engine.close();
+});

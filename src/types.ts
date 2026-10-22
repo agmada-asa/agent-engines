@@ -309,6 +309,41 @@ export interface FileChange {
  */
 export type MessagePhase = "commentary" | "answer";
 
+/**
+ * One step of the agent's working checklist: Codex's plan updates, Claude's
+ * TodoWrite list.
+ */
+export interface PlanStep {
+  step: string;
+  status: "pending" | "in-progress" | "completed";
+}
+
+/**
+ * What the runtime is doing between visible output, for a status line.
+ *
+ * - `working`: a model request or tool step is under way.
+ * - `waiting`: blocked on the user; `waitingOn` says on what, when the runtime does.
+ * - `compacting`: summarising the context.
+ * - `retrying`: a failed model request will be retried; the turn has not failed.
+ * - `idle`: nothing running.
+ */
+export interface RuntimeStatus {
+  state: "working" | "waiting" | "compacting" | "retrying" | "idle";
+  waitingOn?: Array<"approval" | "input">;
+  /** For `retrying`, whatever the runtime reported about the attempt. */
+  retry?: { attempt?: number; maxAttempts?: number; delayMs?: number; message?: string };
+}
+
+/** Lifecycle of a background task or subagent, as far as the runtime reports it. */
+export type TaskStatus = "pending" | "running" | "paused" | "completed" | "failed" | "stopped";
+
+/** Work a task has done so far. */
+export interface TaskUsage {
+  totalTokens: number;
+  toolUses: number;
+  durationMs: number;
+}
+
 /** Fields every event has. `agentId` is set on events from a subagent. */
 interface EventBase {
   threadId: string;
@@ -327,7 +362,38 @@ export type AgentEvent = EventBase &
     | { type: "reasoning.done"; itemId: string; text: string }
     | { type: "tool.started"; itemId: string; tool: ToolCall }
     | { type: "tool.completed"; itemId: string; tool: ToolCall; output?: string; isError: boolean }
+    /** Live output of a running command, in order. `tool.completed` still carries the whole output. */
+    | { type: "tool.output.delta"; itemId: string; delta: string }
+    /** A running tool's progress: a message from the tool (Codex MCP) or time elapsed (Claude). */
+    | { type: "tool.progress"; itemId: string; message?: string; elapsedSeconds?: number }
     | { type: "file.changed"; itemId: string; changes: FileChange[] }
+    /** The turn's combined unified diff so far, replacing the previous one (Codex). */
+    | { type: "diff.updated"; diff: string }
+    /** The agent's checklist, whole each time. `itemId` is the tool call that set it, when there is one. */
+    | { type: "plan.updated"; steps: PlanStep[]; explanation?: string; itemId?: string }
+    /** A plan proposed for review, streamed (Codex plan mode). Use `plan.proposal.done` as the final text. */
+    | { type: "plan.proposal.delta"; itemId: string; delta: string }
+    | { type: "plan.proposal.done"; itemId: string; text: string }
+    | { type: "status"; status: RuntimeStatus }
+    /**
+     * A background task that is not a subagent started (Claude: a background
+     * shell, monitor, workflow or MCP task). `itemId` is the tool call that started it.
+     */
+    | { type: "task.started"; taskId: string; kind: string; description: string; itemId?: string; background?: boolean }
+    /** Progress on a task or a subagent; for a subagent, `taskId` is its `subagentId`. */
+    | {
+      type: "task.progress";
+      taskId: string;
+      status?: TaskStatus;
+      description?: string;
+      /** A one-line summary of what it is doing now, when the runtime makes one. */
+      summary?: string;
+      lastTool?: string;
+      usage?: TaskUsage;
+      background?: boolean;
+      error?: string;
+    }
+    | { type: "task.ended"; taskId: string; status: "completed" | "failed" | "stopped"; summary?: string; outputFile?: string; usage?: TaskUsage }
     | { type: "subagent.started"; subagentId: string; description?: string; prompt?: string; model?: string }
     | { type: "subagent.ended"; subagentId: string; status: "completed" | "failed" | "stopped"; summary?: string }
     | { type: "request"; request: AgentRequest }

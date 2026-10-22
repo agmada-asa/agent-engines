@@ -220,3 +220,81 @@ test("a file-change approval carries the changes its item announced", async () =
   n.normalize("item/completed", { threadId: T, turnId: "turn-1", item: { type: "fileChange", id: "f1", status: "completed", changes: [] } });
   assert.equal(n.proposedChanges("f1"), undefined);
 });
+
+test("live command output and MCP tool progress", () => {
+  const n = normalizer();
+  assert.deepEqual(n.normalize("item/commandExecution/outputDelta", { threadId: T, turnId: "turn-1", itemId: "c1", delta: "compiling…\n" }), [
+    { threadId: T, turnId: "turn-1", type: "tool.output.delta", itemId: "c1", delta: "compiling…\n" },
+  ]);
+  assert.deepEqual(n.normalize("item/mcpToolCall/progress", { threadId: T, turnId: "turn-1", itemId: "t1", message: "Indexed 40 of 120" }), [
+    { threadId: T, turnId: "turn-1", type: "tool.progress", itemId: "t1", message: "Indexed 40 of 120" },
+  ]);
+});
+
+test("plan updates, a proposed plan and the turn diff, without changing the reply text", () => {
+  const n = normalizer();
+  const plan = n.normalize("turn/plan/updated", {
+    threadId: T, turnId: "turn-1", explanation: "Two steps",
+    plan: [{ step: "Read the code", status: "completed" }, { step: "Fix the bug", status: "inProgress" }, { step: "Run tests", status: "pending" }],
+  });
+  assert.deepEqual(plan, [{
+    threadId: T, turnId: "turn-1", type: "plan.updated", explanation: "Two steps",
+    steps: [{ step: "Read the code", status: "completed" }, { step: "Fix the bug", status: "in-progress" }, { step: "Run tests", status: "pending" }],
+  }]);
+  assert.equal("explanation" in n.normalize("turn/plan/updated", { threadId: T, turnId: "turn-1", explanation: null, plan: [] })[0], false);
+
+  assert.deepEqual(n.normalize("item/plan/delta", { threadId: T, turnId: "turn-1", itemId: "p1", delta: "1. Read" }), [
+    { threadId: T, turnId: "turn-1", type: "plan.proposal.delta", itemId: "p1", delta: "1. Read" },
+  ]);
+  assert.deepEqual(n.normalize("item/completed", { threadId: T, turnId: "turn-1", item: { type: "plan", id: "p1", text: "1. Read\n2. Fix" } }), [
+    { threadId: T, turnId: "turn-1", type: "plan.proposal.done", itemId: "p1", text: "1. Read\n2. Fix" },
+  ]);
+
+  const diff = "diff --git a/x b/x\n+new line\n";
+  assert.deepEqual(n.normalize("turn/diff/updated", { threadId: T, turnId: "turn-1", diff }), [{ threadId: T, turnId: "turn-1", type: "diff.updated", diff }]);
+
+  n.normalize("item/completed", { threadId: T, turnId: "turn-1", item: { type: "agentMessage", id: "m1", text: "Fixed it.", phase: "final_answer" } });
+  const completed = n.normalize("turn/completed", { threadId: T, turn: { id: "turn-1", status: "completed", items: [], error: null } });
+  assert.equal((completed[0] as any).text, "Fixed it.");
+});
+
+test("thread status, retries and compaction become status events", () => {
+  const n = normalizer();
+  assert.deepEqual(n.normalize("thread/status/changed", { threadId: T, status: { type: "active", activeFlags: [] } }), [
+    { threadId: T, turnId: "turn-1", type: "status", status: { state: "working" } },
+  ]);
+  assert.deepEqual(n.normalize("thread/status/changed", { threadId: T, status: { type: "active", activeFlags: ["waitingOnApproval", "waitingOnUserInput"] } })[0], {
+    threadId: T, turnId: "turn-1", type: "status", status: { state: "waiting", waitingOn: ["approval", "input"] },
+  });
+  assert.deepEqual(n.normalize("thread/status/changed", { threadId: T, status: { type: "systemError" } }), []);
+
+  // A retried error reports progress but is not the turn's outcome.
+  assert.deepEqual(n.normalize("error", { threadId: T, turnId: "turn-1", willRetry: true, error: { message: "Reconnecting… 1/5", codexErrorInfo: null } }), [
+    { threadId: T, turnId: "turn-1", type: "status", status: { state: "retrying", retry: { message: "Reconnecting… 1/5" } } },
+  ]);
+  assert.deepEqual(n.normalize("item/started", { threadId: T, turnId: "turn-1", item: { type: "contextCompaction", id: "cc" } }), [
+    { threadId: T, turnId: "turn-1", type: "status", status: { state: "compacting" } },
+  ]);
+  assert.equal(n.normalize("turn/completed", { threadId: T, turn: { id: "turn-1", status: "completed", items: [], error: null } })[0].type, "turn.completed");
+  assert.deepEqual(n.normalize("thread/status/changed", { threadId: T, status: { type: "idle" } }), [
+    { threadId: T, turnId: "", type: "status", status: { state: "idle" } },
+  ]);
+});
+
+test("a subagent's progress carries its agentId", () => {
+  const n = normalizer();
+  n.normalize("item/started", { threadId: T, turnId: "turn-1", item: { type: "subAgentActivity", id: "s", kind: "started", agentThreadId: "sub-1" } });
+  const output = n.normalize("item/commandExecution/outputDelta", { threadId: "sub-1", turnId: "sub-turn", itemId: "c9", delta: "ok\n" });
+  assert.deepEqual(output, [{ threadId: T, turnId: "turn-1", agentId: "sub-1", type: "tool.output.delta", itemId: "c9", delta: "ok\n" }]);
+  const plan = n.normalize("turn/plan/updated", { threadId: "sub-1", turnId: "sub-turn", explanation: null, plan: [{ step: "Look", status: "pending" }] });
+  assert.equal(plan[0].agentId, "sub-1");
+});
+
+test("a streamed patch update refreshes the changes a file-change approval shows", () => {
+  const n = normalizer();
+  n.normalize("item/started", { threadId: T, turnId: "turn-1", item: { type: "fileChange", id: "f1", status: "inProgress", changes: [] } });
+  assert.deepEqual(n.normalize("item/fileChange/patchUpdated", {
+    threadId: T, turnId: "turn-1", itemId: "f1", changes: [{ path: "/tmp/a.ts", kind: { type: "update", move_path: null }, diff: "@@ -1 +1 @@\n-a\n+b" }],
+  }), []);
+  assert.deepEqual(n.proposedChanges("f1"), [{ path: "/tmp/a.ts", kind: "update", diff: "@@ -1 +1 @@\n-a\n+b" }]);
+});
