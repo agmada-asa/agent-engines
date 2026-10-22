@@ -12,7 +12,7 @@
 import { randomUUID } from "node:crypto";
 import { homedir, tmpdir } from "node:os";
 import { isAbsolute, join } from "node:path";
-import { readdir, rm } from "node:fs/promises";
+import { readdir, rm, rmdir } from "node:fs/promises";
 import * as sdkModule from "@anthropic-ai/claude-agent-sdk";
 import type {
   CanUseTool,
@@ -233,7 +233,10 @@ export class ClaudeEngine implements Engine {
     const home = this.options.configDir ?? process.env.CLAUDE_CONFIG_DIR ?? join(homedir(), ".claude");
     const mine = (name: string) => name === threadId || name.startsWith(`${threadId}.`) || name.startsWith(`${threadId}-`);
     const projects = join(home, "projects");
-    for (const project of await readdir(projects).catch(() => [] as string[])) await removeMatching(join(projects, project), mine);
+    for (const project of await readdir(projects).catch(() => [] as string[])) {
+      // A project folder this thread emptied goes too; `rmdir` leaves one with anything still in it.
+      if (await removeMatching(join(projects, project), mine)) await removeIfEmpty(join(projects, project), ["memory"]);
+    }
     for (const dir of ["session-env", "file-history", "todos", "debug", "shell-snapshots"]) await removeMatching(join(home, dir), mine);
   }
 
@@ -293,11 +296,17 @@ export class ClaudeEngine implements Engine {
   }
 }
 
-/** Removes entries of a directory whose names match. */
-async function removeMatching(dir: string, match: (name: string) => boolean): Promise<void> {
-  for (const name of (await readdir(dir).catch(() => [] as string[])).filter(match)) {
-    await rm(join(dir, name), { recursive: true, force: true });
-  }
+/** Removes entries of a directory whose names match; returns how many. */
+async function removeMatching(dir: string, match: (name: string) => boolean): Promise<number> {
+  const names = (await readdir(dir).catch(() => [] as string[])).filter(match);
+  for (const name of names) await rm(join(dir, name), { recursive: true, force: true });
+  return names.length;
+}
+
+/** Removes a directory if nothing is left in it but the named subfolders, themselves empty. */
+async function removeIfEmpty(dir: string, emptySubfolders: string[]): Promise<void> {
+  for (const name of emptySubfolders) await rmdir(join(dir, name)).catch(() => undefined);
+  await rmdir(dir).catch(() => undefined);
 }
 
 /** One Claude session and the Claude Code process serving it. */

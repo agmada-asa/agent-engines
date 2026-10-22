@@ -256,6 +256,12 @@ test("deleteThread removes the session and the files kept beside it", async () =
   assert.deepEqual(await readdir(join(home, "projects", "-tmp-work")), ["other.jsonl"]);
   assert.deepEqual(await readdir(join(home, "file-history")), []);
   assert.deepEqual(await readdir(join(home, "todos")), []);
+  // A project folder left with only an empty memory folder is removed too.
+  const solo = "1f9d8a6e-1111-4222-8333-444455556666";
+  await mkdir(join(home, "projects", "-tmp-solo", "memory"), { recursive: true });
+  await writeFile(join(home, "projects", "-tmp-solo", `${solo}.jsonl`), "{}\n");
+  await engine.deleteThread(solo, { cwd: "/tmp/solo" });
+  assert.deepEqual((await readdir(join(home, "projects"))).sort(), ["-tmp-work"]);
   await assert.rejects(engine.deleteThread("../etc", { cwd: "/tmp" }), /not a Claude session ID/);
 });
 
