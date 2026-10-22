@@ -58,7 +58,7 @@ While a turn runs, `turn.steer("…")` adds a message to it and `turn.interrupt(
 
 - `createEngine(provider, options)`: a `CodexEngine` or `ClaudeEngine`. Nothing starts until first use.
 - `Engine`: `availability()`, `models()`, `startThread()`, `resumeThread()`, `deleteThread()`, `close()`.
-- `Thread`: `run(input, { model, effort, fastMode })`, `compact()`, `activeTurn`, `subscribe(listener)`, `subagentTranscript(agentId)`, `mcpStatus()`, `close()`.
+- `Thread`: `run(input, { model, effort, fastMode })`, `compact()`, `activeTurn`, `lastTurn()`, `subscribe(listener)`, `subagentTranscript(agentId)`, `mcpStatus()`, `close()`.
 - `Turn`: async-iterable `AgentEvent`s, plus `id`, `steer()`, `interrupt()` and `result` (never rejects).
 - `AgentEvent`: see below. Events from a subagent carry its `agentId`.
 - Errors: `AgentEngineError` and its subclasses (`RuntimeAuthError`, `RuntimeCompatibilityError`, `SteerRejectedError`…).
@@ -93,7 +93,7 @@ A failed turn has an `error.kind`: `usage-limit` and `rate-limit` come with `res
 
 - **One Codex child per engine.** All Codex threads share one `codex app-server`. If it exits, running turns fail with a `connection` error and the next call starts a new one and resumes the thread.
 - **One Claude Code process per thread.** It stays up while the thread is open, so close threads you are not using.
-- **Process lifetime.** Agents run as children of your process. If your process exits, running turns stop; resume the thread and send again.
+- **Process lifetime.** Agents run as children of your process. If your process exits, running turns stop; resume the thread, check `lastTurn()` and send again.
 - **Claude images** must be base64. Codex takes a path or base64.
 - With `access: "full"` the Claude SDK prints a `CLAUDE_SDK_CAN_USE_TOOL_SHADOWED` warning. It is harmless: AskUserQuestion still reaches `canUseTool` and surfaces as a `request` (covered by the live test).
 
@@ -115,7 +115,7 @@ npm run typecheck
 AGENT_ENGINES_LIVE=1 npm run test:live   # real turns on cheap models, in a /tmp scratch dir
 ```
 
-The live tests run a steered turn, an interrupted turn, a compaction, a resume and a delete on each runtime, plus a Claude question round trip. Override the models with `AGENT_ENGINES_CLAUDE_MODEL` and `AGENT_ENGINES_CODEX_MODEL`.
+The live tests run a steered turn, an interrupted turn, a resume, a compaction and a delete on each runtime, plus a Claude question round trip. Override the models with `AGENT_ENGINES_CLAUDE_MODEL` and `AGENT_ENGINES_CODEX_MODEL`.
 
 ## Licence
 
