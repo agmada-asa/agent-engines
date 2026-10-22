@@ -22,6 +22,7 @@ import type {
   Access,
   AgentEvent,
   Availability,
+  CommandInfo,
   Engine,
   LastTurn,
   McpServerState,
@@ -33,6 +34,8 @@ import type {
   TurnInput,
   TurnOptions,
   TurnResult,
+  UsageReport,
+  UsageWindow,
 } from "../types.ts";
 import {
   CodexClient,
@@ -42,6 +45,7 @@ import {
   type SpawnCodexProcess,
 } from "./client.ts";
 import { CodexNormalizer, codexRequest, codexTool, type PendingCodexRequest } from "./normalize.ts";
+import type { GetAccountRateLimitsResponse } from "./protocol/v2/GetAccountRateLimitsResponse.ts";
 import type { GetAccountResponse } from "./protocol/v2/GetAccountResponse.ts";
 import type { ListMcpServerStatusResponse } from "./protocol/v2/ListMcpServerStatusResponse.ts";
 import type { Model } from "./protocol/v2/Model.ts";
@@ -52,7 +56,10 @@ import type { ThreadResumeParams } from "./protocol/v2/ThreadResumeParams.ts";
 import type { ThreadStartParams } from "./protocol/v2/ThreadStartParams.ts";
 import type { ThreadStartResponse } from "./protocol/v2/ThreadStartResponse.ts";
 import type { ThreadTurnsListResponse } from "./protocol/v2/ThreadTurnsListResponse.ts";
+import type { RateLimitSnapshot } from "./protocol/v2/RateLimitSnapshot.ts";
+import type { RateLimitWindow } from "./protocol/v2/RateLimitWindow.ts";
 import type { SandboxPolicy } from "./protocol/v2/SandboxPolicy.ts";
+import type { SkillsListResponse } from "./protocol/v2/SkillsListResponse.ts";
 import type { TurnStartParams } from "./protocol/v2/TurnStartParams.ts";
 import type { TurnStartResponse } from "./protocol/v2/TurnStartResponse.ts";
 import type { UserInput } from "./protocol/v2/UserInput.ts";
@@ -165,6 +172,67 @@ export function codexModelInfo(model: Model): ModelInfo {
   };
 }
 
+/** A rate limit window's kind, from its length. */
+function windowKind(minutes: number | null): UsageWindow["kind"] {
+  if (minutes === null) return "other";
+  if (minutes <= 24 * 60) return "session";
+  if (minutes <= 8 * 24 * 60) return "weekly";
+  if (minutes <= 32 * 24 * 60) return "monthly";
+  return "other";
+}
+
+/** The windows of one rate limit bucket. */
+function snapshotWindows(snapshot: RateLimitSnapshot, name: string, model: string | undefined): UsageWindow[] {
+  const windows: UsageWindow[] = [];
+  for (const window of [snapshot.primary, snapshot.secondary] as Array<RateLimitWindow | null>) {
+    if (!window) continue;
+    windows.push({
+      kind: windowKind(window.windowDurationMins),
+      name,
+      ...(model ? { model } : {}),
+      usedPercent: window.usedPercent,
+      ...(typeof window.resetsAt === "number" ? { resetsAt: new Date(window.resetsAt * 1000) } : {}),
+    });
+  }
+  return windows;
+}
+
+/** `account/rateLimits/read` in the neutral shape. Buckets other than Codex's own name the model they limit. */
+export function codexUsage(response: GetAccountRateLimitsResponse, plan: string | undefined, checkedAt = new Date()): UsageReport {
+  const buckets = response.rateLimitsByLimitId
+    ? Object.entries(response.rateLimitsByLimitId).filter((entry): entry is [string, RateLimitSnapshot] => !!entry[1])
+    : [[response.rateLimits.limitId ?? "codex", response.rateLimits] as [string, RateLimitSnapshot]];
+  const windows = buckets.flatMap(([id, snapshot]) => {
+    const name = snapshot.limitName ?? snapshot.limitId ?? id;
+    const model = id === "codex" ? undefined : (snapshot.normalModelSlug ?? snapshot.limitName ?? undefined);
+    return snapshotWindows(snapshot, name, model);
+  });
+  const credits = response.rateLimitResetCredits?.availableCount;
+  return {
+    provider: "codex",
+    checkedAt,
+    available: true,
+    ...(plan ? { plan } : {}),
+    windows,
+    ...(credits !== undefined && credits !== null ? { resetCredits: Number(credits) } : {}),
+  };
+}
+
+/** `skills/list` for one folder as commands; `/compact` is the one command the app-server runs itself. */
+export function codexCommands(response: SkillsListResponse | undefined): CommandInfo[] {
+  const commands: CommandInfo[] = [{ name: "compact", kind: "command", description: "Compact the conversation's context.", builtin: true }];
+  const seen = new Set<string>();
+  for (const entry of response?.data ?? []) {
+    for (const skill of entry.skills) {
+      if (!skill.enabled || seen.has(skill.name)) continue;
+      seen.add(skill.name);
+      const description = skill.interface?.shortDescription ?? skill.shortDescription ?? skill.description;
+      commands.push({ name: skill.name, kind: "skill", ...(description ? { description } : {}) });
+    }
+  }
+  return commands;
+}
+
 /** Codex through `codex app-server`. */
 export class CodexEngine implements Engine {
   readonly provider = "codex" as const;
@@ -203,6 +271,23 @@ export class CodexEngine implements Engine {
       if (!cursor) break;
     }
     return models;
+  }
+
+  async usage(): Promise<UsageReport> {
+    const client = await this.connection();
+    const account = await client.request<GetAccountResponse>("account/read", {}).catch(() => undefined);
+    const plan = account?.account?.type === "chatgpt" ? String(account.account.planType) : undefined;
+    if (account?.account && account.account.type !== "chatgpt") return { provider: "codex", checkedAt: new Date(), available: false, windows: [] };
+    const limits = await client.request<GetAccountRateLimitsResponse>("account/rateLimits/read", {});
+    return codexUsage(limits, plan);
+  }
+
+  async commands(options: { cwd?: string } = {}): Promise<CommandInfo[]> {
+    const client = await this.connection();
+    const cwd = options.cwd ?? this.options.cwd ?? homedir();
+    if (!isAbsolute(cwd)) throw new AgentEngineError("commands() needs an absolute cwd.");
+    const skills = await client.request<SkillsListResponse>("skills/list", { cwds: [cwd] });
+    return codexCommands(skills);
   }
 
   async startThread(options: ThreadOptions): Promise<Thread> {

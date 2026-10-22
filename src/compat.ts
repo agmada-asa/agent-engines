@@ -43,7 +43,9 @@ export const CODEX_PROTOCOL_CONTRACT = {
   clientRequests: [
     "initialize",
     "account/read",
+    "account/rateLimits/read",
     "model/list",
+    "skills/list",
     "thread/start",
     "thread/resume",
     "thread/turns/list",

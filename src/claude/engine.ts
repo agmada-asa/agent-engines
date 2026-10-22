@@ -39,6 +39,7 @@ import type {
   AgentEvent,
   AgentRequest,
   Availability,
+  CommandInfo,
   Engine,
   LastTurn,
   McpServerState,
@@ -50,6 +51,8 @@ import type {
   TurnInput,
   TurnOptions,
   TurnResult,
+  UsageReport,
+  UsageWindow,
 } from "../types.ts";
 import { ClaudeNormalizer, claudeTranscript, claudeUsage, classifyClaudeError } from "./normalize.ts";
 
@@ -180,6 +183,62 @@ function accountAvailability(init: SDKControlInitializeResponse, requireSubscrip
   return { provider: "claude", ready: false, reason: "signed-out", message: "Claude is not signed in. Run `claude` and sign in, then try again.", ...versionField };
 }
 
+/** The SDK's `/usage` data, as far as this library reads it. */
+interface ClaudeUsageData {
+  subscription_type?: string | null;
+  rate_limits_available?: boolean;
+  rate_limits?: Record<string, unknown> | null;
+}
+
+/** A window from the SDK's usage data, when it has a figure. */
+function claudeWindow(value: unknown, kind: UsageWindow["kind"], name: string, model?: string): UsageWindow | undefined {
+  const window = value as { utilization?: number | null; resets_at?: string | null } | null | undefined;
+  if (typeof window?.utilization !== "number") return undefined;
+  const resetsAt = window.resets_at ? new Date(window.resets_at) : undefined;
+  return {
+    kind,
+    name,
+    ...(model ? { model } : {}),
+    usedPercent: window.utilization,
+    ...(resetsAt && !Number.isNaN(resetsAt.getTime()) ? { resetsAt } : {}),
+  };
+}
+
+/** The SDK's usage data in the neutral shape. */
+export function claudeUsageReport(data: ClaudeUsageData | undefined, checkedAt = new Date()): UsageReport {
+  const plan = data?.subscription_type ?? undefined;
+  const limits = data?.rate_limits;
+  if (!data?.rate_limits_available || !limits) return { provider: "claude", checkedAt, available: false, ...(plan ? { plan } : {}), windows: [] };
+  const windows = [
+    claudeWindow(limits.five_hour, "session", "five_hour"),
+    claudeWindow(limits.seven_day, "weekly", "seven_day"),
+    claudeWindow(limits.seven_day_opus, "weekly", "seven_day_opus", "Opus"),
+    claudeWindow(limits.seven_day_sonnet, "weekly", "seven_day_sonnet", "Sonnet"),
+    ...(Array.isArray(limits.model_scoped) ? limits.model_scoped : []).map((scoped: { display_name?: string }) =>
+      claudeWindow(scoped, "weekly", `seven_day_${String(scoped.display_name ?? "model").toLowerCase()}`, scoped.display_name),
+    ),
+  ].filter((window): window is UsageWindow => window !== undefined);
+  return { provider: "claude", checkedAt, available: true, ...(plan ? { plan } : {}), windows };
+}
+
+/** Claude Code's slash commands (skills included) as commands. */
+export function claudeCommands(init: Pick<SDKControlInitializeResponse, "commands">): CommandInfo[] {
+  const seen = new Set<string>();
+  const commands: CommandInfo[] = [];
+  for (const command of init.commands ?? []) {
+    if (!command?.name || seen.has(command.name)) continue;
+    seen.add(command.name);
+    commands.push({
+      name: command.name,
+      kind: "command",
+      ...(command.description ? { description: command.description } : {}),
+      ...(command.argumentHint ? { argumentHint: command.argumentHint } : {}),
+      ...((command as { builtin?: boolean }).builtin ? { builtin: true } : {}),
+    });
+  }
+  return commands;
+}
+
 /** Claude through the Claude Agent SDK. */
 export class ClaudeEngine implements Engine {
   readonly provider = "claude" as const;
@@ -205,6 +264,23 @@ export class ClaudeEngine implements Engine {
 
   async models(): Promise<ModelInfo[]> {
     return (await this.probe()).models.map(claudeModelInfo);
+  }
+
+  async usage(): Promise<UsageReport> {
+    return this.withProbe(async (query) => {
+      const read = (query as unknown as { usage_EXPERIMENTAL_MAY_CHANGE_DO_NOT_RELY_ON_THIS_API_YET?: (options: { skipBehaviors: boolean }) => Promise<ClaudeUsageData> })
+        .usage_EXPERIMENTAL_MAY_CHANGE_DO_NOT_RELY_ON_THIS_API_YET;
+      // An SDK without the call reports no limits rather than failing.
+      if (typeof read !== "function") return claudeUsageReport(undefined);
+      return claudeUsageReport(await read.call(query, { skipBehaviors: true }));
+    });
+  }
+
+  async commands(options: { cwd?: string } = {}): Promise<CommandInfo[]> {
+    const cwd = options.cwd ?? tmpdir();
+    if (!isAbsolute(cwd)) throw new AgentEngineError("commands() needs an absolute cwd.");
+    // Settings load as a thread's would, so the user's, the project's and plugins' commands are listed.
+    return claudeCommands(await this.withProbe((query) => query.initializationResult(), { cwd }));
   }
 
   async startThread(options: ThreadOptions): Promise<Thread> {
@@ -274,17 +350,25 @@ export class ClaudeEngine implements Engine {
   }
 
   /** Starts Claude Code without a prompt, reads its init result and stops it. No model is called. */
-  private async probe(): Promise<SDKControlInitializeResponse> {
+  private probe(): Promise<SDKControlInitializeResponse> {
+    return this.withProbe((query) => query.initializationResult());
+  }
+
+  /**
+   * Starts Claude Code without a prompt, asks it something and stops it. No
+   * model is called and no MCP server starts. With `settings`, the settings files
+   * for that folder load as a thread's would; without, none do.
+   */
+  private async withProbe<T>(use: (query: Query) => Promise<T>, settings?: { cwd: string }): Promise<T> {
     const input = new InputQueue();
     const probe = this.sdk.query({
       prompt: input,
       options: {
-        cwd: tmpdir(),
+        cwd: settings?.cwd ?? tmpdir(),
         env: this.environment(),
-        settingSources: [],
+        ...(settings ? {} : { settingSources: [], tools: [] }),
         strictMcpConfig: true,
         mcpServers: {},
-        tools: [],
         persistSession: false,
         ...(this.options.executable ? { pathToClaudeCodeExecutable: this.options.executable } : {}),
       },
@@ -292,7 +376,7 @@ export class ClaudeEngine implements Engine {
     let timer: ReturnType<typeof setTimeout> | undefined;
     try {
       return await Promise.race([
-        probe.initializationResult(),
+        use(probe),
         new Promise<never>((_, reject) => {
           timer = setTimeout(() => reject(new AgentEngineError("Claude Code did not initialise in time.")), PROBE_TIMEOUT_MS);
         }),

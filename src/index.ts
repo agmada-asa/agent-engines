@@ -19,8 +19,8 @@ export function createEngine<P extends ProviderId>(provider: P, options?: Engine
 }
 
 export type * from "./types.ts";
-export { CodexEngine, codexModelInfo, type CodexEngineOptions, type CodexToolCall } from "./codex/engine.ts";
-export { ClaudeEngine, CLAUDE_CODE_MIN_VERSION, claudeModelInfo, type ClaudeEngineOptions, type ClaudeSdk } from "./claude/engine.ts";
+export { CodexEngine, codexCommands, codexModelInfo, codexUsage, type CodexEngineOptions, type CodexToolCall } from "./codex/engine.ts";
+export { ClaudeEngine, CLAUDE_CODE_MIN_VERSION, claudeCommands, claudeModelInfo, claudeUsageReport, type ClaudeEngineOptions, type ClaudeSdk } from "./claude/engine.ts";
 export {
   CodexClient,
   CodexRpcError,

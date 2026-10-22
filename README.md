@@ -57,7 +57,7 @@ While a turn runs, `turn.steer("…")` adds a message to it and `turn.interrupt(
 ## Public API
 
 - `createEngine(provider, options)`: a `CodexEngine` or `ClaudeEngine`. Nothing starts until first use.
-- `Engine`: `availability()`, `models()`, `startThread()`, `resumeThread()`, `deleteThread()`, `close()`. `CodexEngine.mcpStatus()` also lists the app-server's MCP servers before any thread starts.
+- `Engine`: `availability()`, `models()`, `usage()`, `commands()`, `startThread()`, `resumeThread()`, `deleteThread()`, `close()`. `CodexEngine.mcpStatus()` also lists the app-server's MCP servers before any thread starts.
 - `Thread`: `run(input, { model, effort, fastMode })`, `compact()`, `activeTurn`, `lastTurn()`, `interruptTurn(turnId)`, `subscribe(listener)`, `subagentTranscript(agentId)`, `mcpStatus()`, `close()`.
 - `Turn`: async-iterable `AgentEvent`s, plus `id`, `steer()`, `interrupt()` and `result` (never rejects).
 - `AgentEvent`: see below. Events from a subagent carry its `agentId`.
@@ -128,6 +128,12 @@ A failed turn has an `error.kind`: `usage-limit` and `rate-limit` come with `res
 Network failures have kind `connection`. Authentication and context errors stay distinct even if an earlier usage report was rejected. The engine restores runtime connections and thread handles; the app decides whether and when to retry interrupted work, persists pending retries and cancels them when the user stops. A transient overload does not inherit an unrelated subscription reset time.
 
 `thread.subscribe` sees every event on the thread, including turns the agent starts by itself (Claude does when a background subagent reports back).
+
+### Usage and commands
+
+`engine.usage()` reads the signed-in plan's windows (Codex `account/rateLimits/read`; Claude the data behind `/usage`) without a model call. Each window has a `kind` (`session`, `weekly`, `monthly`), `usedPercent` and `resetsAt`, and `model` when it limits one model family. An account with no plan limits reports `available: false`.
+
+`engine.commands({ cwd })` lists what a thread in that folder could use: Claude Code's slash commands (skills and plugin commands included), and Codex's enabled skills plus `/compact`. Claude's list comes from a probe that loads the folder's settings but starts no MCP server, so commands MCP servers add are left out.
 
 ## Behaviour worth knowing
 

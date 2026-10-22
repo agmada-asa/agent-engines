@@ -53,8 +53,13 @@ export class FakeQuery {
       models: this.script.models ?? [{ value: "claude-haiku-5-5", displayName: "Haiku 5.5", description: "Fast", supportedEffortLevels: ["low", "medium", "high"], supportsFastMode: false }],
       account: this.script.account ?? { subscriptionType: "max", email: "someone@example.com", apiKeySource: "none", apiProvider: "firstParty" },
       claude_code_version: this.script.version ?? "2.1.308",
-      commands: [], agents: [], output_style: "default", available_output_styles: [],
+      commands: this.script.commands ?? [], agents: [], output_style: "default", available_output_styles: [],
     };
+  }
+
+  async usage_EXPERIMENTAL_MAY_CHANGE_DO_NOT_RELY_ON_THIS_API_YET(options: unknown) {
+    this.calls.push({ method: "usage", args: [options] });
+    return this.script.usage ?? { subscription_type: "max", rate_limits_available: false, rate_limits: null };
   }
 
   async interrupt() {
@@ -108,6 +113,8 @@ export interface FakeClaudeScript {
   account?: Message;
   version?: string;
   initError?: Error;
+  commands?: Message[];
+  usage?: Message;
   /** Runs for each user message the engine sends. */
   onUser?: (message: Message, query: FakeQuery) => void | Promise<void>;
   onInterrupt?: (query: FakeQuery) => void;

@@ -186,6 +186,54 @@ test("availability and models come from the no-prompt probe", async () => {
   assert.equal((await new ClaudeEngine({ sdk: signedOut.sdk }).availability()).reason, "signed-out");
 });
 
+test("usage() reads the plan's windows from a probe that starts no MCP server", async () => {
+  const { sdk, queries } = fakeClaudeSdk({
+    usage: {
+      subscription_type: "max",
+      rate_limits_available: true,
+      rate_limits: {
+        five_hour: { utilization: 46, resets_at: "2026-10-22T19:40:00.445Z" },
+        seven_day: { utilization: 26, resets_at: "2026-10-28T06:00:00.445Z" },
+        seven_day_opus: null,
+        seven_day_oauth_apps: { utilization: 3, resets_at: null },
+        model_scoped: [{ display_name: "Fable", utilization: 0, resets_at: "2026-10-28T06:00:00.000Z" }],
+      },
+    },
+  });
+  const report = await new ClaudeEngine({ sdk }).usage();
+  assert.equal(report.available, true);
+  assert.equal(report.plan, "max");
+  assert.deepEqual(report.windows, [
+    { kind: "session", name: "five_hour", usedPercent: 46, resetsAt: new Date("2026-10-22T19:40:00.445Z") },
+    { kind: "weekly", name: "seven_day", usedPercent: 26, resetsAt: new Date("2026-10-28T06:00:00.445Z") },
+    { kind: "weekly", name: "seven_day_fable", model: "Fable", usedPercent: 0, resetsAt: new Date("2026-10-28T06:00:00.000Z") },
+  ]);
+  assert.deepEqual(queries[0].calls.at(-1), { method: "usage", args: [{ skipBehaviors: true }] });
+  assert.equal(queries[0].options.strictMcpConfig, true);
+  assert.deepEqual(queries[0].options.mcpServers, {});
+  assert.equal(queries[0].closed, true);
+  const none = fakeClaudeSdk();
+  assert.deepEqual((await new ClaudeEngine({ sdk: none.sdk }).usage()).windows, []);
+});
+
+test("commands() lists slash commands and skills with the folder's settings loaded", async () => {
+  const { sdk, queries } = fakeClaudeSdk({
+    commands: [
+      { name: "compact", description: "Clear history but keep a summary", argumentHint: "<instructions>", builtin: true },
+      { name: "figma:figma-use", description: "Use Figma", argumentHint: "" },
+      { name: "compact", description: "A duplicate", argumentHint: "" },
+    ],
+  });
+  assert.deepEqual(await new ClaudeEngine({ sdk }).commands({ cwd: "/tmp/work" }), [
+    { name: "compact", kind: "command", description: "Clear history but keep a summary", argumentHint: "<instructions>", builtin: true },
+    { name: "figma:figma-use", kind: "command", description: "Use Figma" },
+  ]);
+  assert.equal(queries[0].options.cwd, "/tmp/work");
+  assert.equal(queries[0].options.settingSources, undefined);
+  assert.equal(queries[0].options.strictMcpConfig, true);
+  assert.equal(queries[0].inputs.length, 0);
+});
+
 test("a usage limit fails the turn with its reset time", async () => {
   const { sdk } = fakeClaudeSdk({
     onUser: (_message, query) => {

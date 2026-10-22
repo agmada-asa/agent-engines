@@ -17,6 +17,17 @@ export interface Engine {
   availability(): Promise<Availability>;
   /** The models and efforts the signed-in runtime offers right now. */
   models(): Promise<ModelInfo[]>;
+  /**
+   * How much of the signed-in plan is used, window by window. Asks the runtime
+   * now; no model is called. Never throws for an account without plan limits:
+   * `available` is false instead.
+   */
+  usage(): Promise<UsageReport>;
+  /**
+   * The slash commands and skills a thread in `cwd` would have: the user's,
+   * the project's and the runtime's own. No model is called.
+   */
+  commands(options?: { cwd?: string }): Promise<CommandInfo[]>;
   /** Starts a new thread. Its ID is known straight away and can be saved to resume it later. */
   startThread(options: ThreadOptions): Promise<Thread>;
   /** Reopens a saved thread in the same `cwd`; history stays with the runtime. */
@@ -61,6 +72,47 @@ export interface ModelInfo {
   /** Hidden from the runtime's own picker (Codex), but still usable. */
   hidden?: boolean;
   inputModalities?: string[];
+}
+
+/** One usage window of the signed-in plan. */
+export interface UsageWindow {
+  /** `session` is the short window (about five hours); the others are calendar-length. */
+  kind: "session" | "weekly" | "monthly" | "other";
+  /** The runtime's own name for it (`five_hour`, `seven_day`, `codex`…). */
+  name: string;
+  /** The model family the window is limited to, when it is one (`Fable`). */
+  model?: string;
+  /** 0–100. */
+  usedPercent: number;
+  resetsAt?: Date;
+}
+
+/** Result of `Engine.usage()`. */
+export interface UsageReport {
+  provider: ProviderId;
+  checkedAt: Date;
+  /** False when the account has no plan limits to report (an API key), or the runtime would not say. */
+  available: boolean;
+  /** Plan name on a subscription (`plus`, `max`…). */
+  plan?: string;
+  windows: UsageWindow[];
+  /** Codex: banked credits that clear the current windows. */
+  resetCredits?: number;
+}
+
+/** A slash command or skill a thread can use. */
+export interface CommandInfo {
+  name: string;
+  /**
+   * `command` runs when a message starts with `/name`. `skill` is a skill the
+   * agent loads by name (Codex reads `$name` anywhere in a message).
+   */
+  kind: "command" | "skill";
+  description?: string;
+  /** What follows the command, e.g. `<file>`. */
+  argumentHint?: string;
+  /** The runtime's own, rather than the user's, a project's or a plugin's. */
+  builtin?: boolean;
 }
 
 /**

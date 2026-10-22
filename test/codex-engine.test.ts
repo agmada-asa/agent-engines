@@ -63,6 +63,59 @@ test("models() maps the catalogue, including fast mode", async () => {
   await engine.close();
 });
 
+test("usage() maps each rate limit bucket's windows by their length", async () => {
+  const window = (usedPercent: number, minutes: number, resetsAt: number) => ({ usedPercent, windowDurationMins: minutes, resetsAt });
+  const snapshot = (limitId: string, primary: unknown, secondary: unknown, extra: Record<string, unknown> = {}) => ({
+    limitId, limitName: null, normalModelSlug: null, primary, secondary, credits: null, individualLimit: null, spendControlReached: null, planType: "plus", rateLimitReachedType: null, ...extra,
+  });
+  const { spawn } = fakeSpawner({
+    "account/rateLimits/read": () => ({
+      ordinaryUsageAllowed: true,
+      rateLimits: snapshot("codex", window(100, 300, 1_792_000_000), window(31, 10_080, 1_793_000_000)),
+      rateLimitsByLimitId: {
+        codex: snapshot("codex", window(100, 300, 1_792_000_000), window(31, 10_080, 1_793_000_000)),
+        "gpt-6-sol": snapshot("gpt-6-sol", null, window(5, 10_080, 1_793_000_000), { normalModelSlug: "gpt-6-sol" }),
+      },
+      rateLimitResetCredits: { availableCount: 2, credits: null },
+      accountId: null,
+      rateLimitUpsell: null,
+    }),
+  });
+  const engine = new CodexEngine({ spawnProcess: spawn });
+  const report = await engine.usage();
+  assert.equal(report.plan, "plus");
+  assert.equal(report.available, true);
+  assert.equal(report.resetCredits, 2);
+  assert.deepEqual(report.windows, [
+    { kind: "session", name: "codex", usedPercent: 100, resetsAt: new Date(1_792_000_000_000) },
+    { kind: "weekly", name: "codex", usedPercent: 31, resetsAt: new Date(1_793_000_000_000) },
+    { kind: "weekly", name: "gpt-6-sol", model: "gpt-6-sol", usedPercent: 5, resetsAt: new Date(1_793_000_000_000) },
+  ]);
+  await engine.close();
+});
+
+test("commands() lists the folder's enabled skills after /compact", async () => {
+  const { spawn, children } = fakeSpawner({
+    "skills/list": () => ({
+      data: [{
+        cwd: "/tmp/work",
+        errors: [],
+        skills: [
+          { name: "pdf:pdf", description: "Long description.", interface: { shortDescription: "Read PDFs", iconSmallUrl: null, iconLargeUrl: null }, path: "/s/pdf", scope: "user", enabled: true, pluginId: "pdf" },
+          { name: "off", description: "Disabled", path: "/s/off", scope: "user", enabled: false, pluginId: null },
+        ],
+      }],
+    }),
+  });
+  const engine = new CodexEngine({ spawnProcess: spawn });
+  assert.deepEqual(await engine.commands({ cwd: "/tmp/work" }), [
+    { name: "compact", kind: "command", description: "Compact the conversation's context.", builtin: true },
+    { name: "pdf:pdf", kind: "skill", description: "Read PDFs" },
+  ]);
+  assert.deepEqual(children[0].requests("skills/list")[0], { cwds: ["/tmp/work"] });
+  await engine.close();
+});
+
 test("a thread starts with mapped options, runs a turn and streams normalised events", async () => {
   const { spawn, children } = fakeSpawner(handlers());
   const engine = new CodexEngine({ spawnProcess: spawn });
