@@ -22,7 +22,7 @@ test("startThread maps neutral options onto SDK options and checks before any pr
   const engine = new ClaudeEngine({ sdk, env: { PATH: "/bin", ANTHROPIC_API_KEY: "sk-ant" } });
   const thread = await engine.startThread({
     cwd: "/tmp/work", model: "claude-haiku-5-5", effort: "low", fastMode: true, access: "full", instructions: "Be brief.",
-    env: { EXTRA: "1" }, mcpServers: { ocean: { command: "/usr/bin/node", args: ["mcp.js"] }, remote: { type: "http", url: "https://x.test/mcp" } },
+    env: { EXTRA: "1" }, mcpServers: { ocean: { command: "/usr/bin/node", args: ["mcp.js"] }, remote: { type: "http", url: "https://x.test/mcp" }, host: { type: "sdk", name: "host", instance: { inProcess: true } } },
     claude: { settingSources: ["user"], disallowedTools: ["WebFetch"], extra: { maxTurns: 5 } },
   });
   const options = queries[0].options;
@@ -42,7 +42,11 @@ test("startThread maps neutral options onto SDK options and checks before any pr
   assert.equal(options.forwardSubagentText, true);
   assert.equal(options.env.ANTHROPIC_API_KEY, undefined);
   assert.equal(options.env.EXTRA, "1");
-  assert.deepEqual(options.mcpServers, { ocean: { type: "stdio", command: "/usr/bin/node", args: ["mcp.js"] }, remote: { type: "http", url: "https://x.test/mcp" } });
+  assert.deepEqual(options.mcpServers, {
+    ocean: { type: "stdio", command: "/usr/bin/node", args: ["mcp.js"] },
+    remote: { type: "http", url: "https://x.test/mcp" },
+    host: { type: "sdk", name: "host", instance: { inProcess: true } },
+  });
   assert.equal(queries[0].inputs.length, 0);
   await engine.close();
   assert.equal(queries[0].closed, true);

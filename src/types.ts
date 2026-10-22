@@ -63,10 +63,15 @@ export interface ModelInfo {
   inputModalities?: string[];
 }
 
-/** An MCP server given to one thread. */
+/**
+ * An MCP server given to one thread. `sdk` is an in-process server made with the
+ * Claude Agent SDK's `createSdkMcpServer`, passed as is; Claude only (Codex
+ * answers host tools through `codex.dynamicTools` instead).
+ */
 export type McpServer =
   | { type?: "stdio"; command: string; args?: string[]; env?: Record<string, string>; cwd?: string }
-  | { type: "http"; url: string; headers?: Record<string, string> };
+  | { type: "http"; url: string; headers?: Record<string, string> }
+  | { type: "sdk"; name: string; instance: unknown };
 
 /** One MCP server as a thread sees it. */
 export interface McpServerState {

@@ -598,6 +598,7 @@ function mcpConfig(servers: NonNullable<ThreadOptions["mcpServers"]>): Record<st
   const config: Record<string, unknown> = {};
   for (const [name, server] of Object.entries(servers)) {
     if (!/^[A-Za-z0-9_-]{1,64}$/u.test(name)) throw new AgentEngineError(`MCP server name ${JSON.stringify(name)} cannot be used safely.`);
+    if (server.type === "sdk") throw new AgentEngineError(`MCP server ${name} is an in-process Claude SDK server; Codex takes host tools through codex.dynamicTools.`);
     config[name] = server.type === "http"
       ? { url: server.url, ...(server.headers ? { http_headers: server.headers } : {}) }
       : {

@@ -690,6 +690,8 @@ function claudeMcpServers(servers: NonNullable<ThreadOptions["mcpServers"]>): Re
     if (!/^[A-Za-z0-9_-]{1,64}$/u.test(name)) throw new AgentEngineError(`MCP server name ${JSON.stringify(name)} cannot be used safely.`);
     if (server.type === "http") {
       config[name] = { type: "http", url: server.url, ...(server.headers ? { headers: server.headers } : {}) };
+    } else if (server.type === "sdk") {
+      config[name] = server as McpServerConfig;
     } else {
       if (server.cwd) throw new AgentEngineError(`Claude cannot set a working directory for MCP server ${name}; wrap the command instead.`);
       config[name] = { type: "stdio", command: server.command, args: server.args ?? [], ...(server.env ? { env: server.env } : {}) };
