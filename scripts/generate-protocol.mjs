@@ -68,6 +68,7 @@ const ROOTS = [
   "v2/McpServerElicitationRequestParams.ts", "v2/McpServerElicitationRequestResponse.ts",
   "v2/DynamicToolCallParams.ts", "v2/DynamicToolCallResponse.ts",
   "v2/ListMcpServerStatusParams.ts", "v2/ListMcpServerStatusResponse.ts",
+  "v2/SkillsListParams.ts", "v2/SkillsListResponse.ts",
 ];
 
 /** Keeps the reachable files and adds `.ts` to their relative imports. */
