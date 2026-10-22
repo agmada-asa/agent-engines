@@ -17,6 +17,7 @@ export class FakeQuery {
   private readonly outbox: Message[] = [];
   private waiting?: () => void;
   private ended = false;
+  private failure?: Error;
 
   constructor(
     private readonly prompt: AsyncIterable<Message>,
@@ -36,6 +37,12 @@ export class FakeQuery {
   /** Ends the stream, as a process exit would. */
   end(): void {
     this.ended = true;
+    this.wake();
+  }
+
+  /** Makes the stream throw, as the SDK does when Claude Code exits with an error. */
+  fail(error: Error): void {
+    this.failure = error;
     this.wake();
   }
 
@@ -75,6 +82,7 @@ export class FakeQuery {
         yield message;
         continue;
       }
+      if (this.failure) throw this.failure;
       if (this.ended) return;
       await new Promise<void>((resolve) => (this.waiting = resolve));
     }

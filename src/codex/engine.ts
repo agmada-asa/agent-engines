@@ -52,6 +52,7 @@ import type { ThreadResumeParams } from "./protocol/v2/ThreadResumeParams.ts";
 import type { ThreadStartParams } from "./protocol/v2/ThreadStartParams.ts";
 import type { ThreadStartResponse } from "./protocol/v2/ThreadStartResponse.ts";
 import type { ThreadTurnsListResponse } from "./protocol/v2/ThreadTurnsListResponse.ts";
+import type { SandboxPolicy } from "./protocol/v2/SandboxPolicy.ts";
 import type { TurnStartParams } from "./protocol/v2/TurnStartParams.ts";
 import type { TurnStartResponse } from "./protocol/v2/TurnStartResponse.ts";
 import type { UserInput } from "./protocol/v2/UserInput.ts";
@@ -76,6 +77,8 @@ export interface CodexToolCall {
 export interface CodexEngineOptions {
   /** Codex executable; defaults to `codex` on PATH. */
   executable?: string;
+  /** Absolute working directory of the app-server process; defaults to the home directory. Threads set their own. */
+  cwd?: string;
   /** Environment for the app-server and the commands it runs; defaults to the current one. */
   env?: NodeJS.ProcessEnv;
   /** Process-wide launch flags: disabled features, `--config` overrides. */
@@ -115,6 +118,24 @@ function threadAccess(access: Access | undefined): Pick<ThreadStartParams, "appr
     default:
       return {};
   }
+}
+
+/**
+ * Per-turn approval and sandbox policy, sent only when the thread sets
+ * `codex.networkAccess`: thread start has a sandbox mode but no network flag.
+ */
+function turnPolicy(options: ThreadOptions): Pick<TurnStartParams, "approvalPolicy" | "sandboxPolicy"> {
+  const networkAccess = options.codex?.networkAccess;
+  if (networkAccess === undefined) return {};
+  const access = threadAccess(options.access);
+  const approvalPolicy = options.codex?.approvalPolicy ?? access.approvalPolicy;
+  const sandbox = options.codex?.sandbox ?? access.sandbox;
+  const sandboxPolicy: SandboxPolicy | undefined =
+    sandbox === "read-only" ? { type: "readOnly", networkAccess }
+    : sandbox === "workspace-write" ? { type: "workspaceWrite", writableRoots: [], networkAccess, excludeTmpdirEnvVar: false, excludeSlashTmp: false }
+    : sandbox === "danger-full-access" ? { type: "dangerFullAccess" }
+    : undefined;
+  return { ...(approvalPolicy ? { approvalPolicy } : {}), ...(sandboxPolicy ? { sandboxPolicy } : {}) };
 }
 
 /** Codex `UserInput` items for a turn. */
@@ -212,6 +233,15 @@ export class CodexEngine implements Engine {
     }
   }
 
+  /**
+   * The MCP servers the app-server process loaded, their state and tool names,
+   * before any thread starts: for checking a launch (servers disabled, a
+   * required server up) without creating a thread. No model call.
+   */
+  async mcpStatus(): Promise<McpServerState[]> {
+    return listMcpServers(await this.connection());
+  }
+
   async close(): Promise<void> {
     this.closed = true;
     for (const thread of [...this.threads]) await thread.close().catch(() => undefined);
@@ -240,7 +270,7 @@ export class CodexEngine implements Engine {
 
   private async connect(): Promise<CodexClient> {
     const client = await CodexClient.connect({
-      cwd: homedir(),
+      cwd: this.options.cwd ?? homedir(),
       env: codexEnvironment(this.options),
       ...(this.options.executable ? { executable: this.options.executable } : {}),
       ...(this.options.launch ? { launch: this.options.launch } : {}),
@@ -320,6 +350,23 @@ async function descendantThreadIds(client: CodexClient, threadId: string): Promi
     }
   }
   return [...ids];
+}
+
+/** Every MCP server's state, process-wide or as one thread sees them. */
+async function listMcpServers(client: CodexClient, threadId?: string): Promise<McpServerState[]> {
+  const servers: McpServerState[] = [];
+  let cursor: string | null = null;
+  for (let page = 0; page < 20; page += 1) {
+    const response: ListMcpServerStatusResponse = await client.request<ListMcpServerStatusResponse>("mcpServerStatus/list", {
+      ...(threadId ? { threadId } : {}), detail: "toolsAndAuthOnly", ...(cursor ? { cursor } : {}),
+    });
+    for (const server of response.data) {
+      servers.push({ name: server.name, status: String((server as { runtimeStatus?: unknown }).runtimeStatus ?? "unknown"), tools: Object.keys(server.tools ?? {}) });
+    }
+    cursor = response.nextCursor;
+    if (!cursor) break;
+  }
+  return servers;
 }
 
 /** Availability from `account/read`. */
@@ -475,21 +522,13 @@ class CodexThread implements Thread {
     return { turnId: turn.id, status: turn.status === "inProgress" ? "running" : turn.status, text: message?.text ?? "" };
   }
 
-  async mcpStatus(): Promise<McpServerState[]> {
+  async interruptTurn(turnId: string): Promise<void> {
     const client = await this.ready();
-    const servers: McpServerState[] = [];
-    let cursor: string | null = null;
-    for (let page = 0; page < 20; page += 1) {
-      const response: ListMcpServerStatusResponse = await client.request<ListMcpServerStatusResponse>("mcpServerStatus/list", {
-        threadId: this.id, detail: "toolsAndAuthOnly", ...(cursor ? { cursor } : {}),
-      });
-      for (const server of response.data) {
-        servers.push({ name: server.name, status: String((server as { runtimeStatus?: unknown }).runtimeStatus ?? "unknown"), tools: Object.keys(server.tools ?? {}) });
-      }
-      cursor = response.nextCursor;
-      if (!cursor) break;
-    }
-    return servers;
+    await client.request("turn/interrupt", { threadId: this.id, turnId });
+  }
+
+  async mcpStatus(): Promise<McpServerState[]> {
+    return listMcpServers(await this.ready(), this.id);
   }
 
   async close(): Promise<void> {
@@ -557,6 +596,7 @@ class CodexThread implements Thread {
         ...(turnOptions.model ? { model: turnOptions.model } : {}),
         ...((turnOptions.effort ?? this.options.effort) ? { effort: turnOptions.effort ?? this.options.effort } : {}),
         ...(fastMode !== undefined ? { serviceTier: fastMode ? FAST_TIER : null } : {}),
+        ...turnPolicy(this.options),
       };
       const response = await client.request<TurnStartResponse>("turn/start", params);
       turn.setId(response.turn.id);

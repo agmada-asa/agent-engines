@@ -57,8 +57,8 @@ While a turn runs, `turn.steer("…")` adds a message to it and `turn.interrupt(
 ## Public API
 
 - `createEngine(provider, options)`: a `CodexEngine` or `ClaudeEngine`. Nothing starts until first use.
-- `Engine`: `availability()`, `models()`, `startThread()`, `resumeThread()`, `deleteThread()`, `close()`.
-- `Thread`: `run(input, { model, effort, fastMode })`, `compact()`, `activeTurn`, `lastTurn()`, `subscribe(listener)`, `subagentTranscript(agentId)`, `mcpStatus()`, `close()`.
+- `Engine`: `availability()`, `models()`, `startThread()`, `resumeThread()`, `deleteThread()`, `close()`. `CodexEngine.mcpStatus()` also lists the app-server's MCP servers before any thread starts.
+- `Thread`: `run(input, { model, effort, fastMode })`, `compact()`, `activeTurn`, `lastTurn()`, `interruptTurn(turnId)`, `subscribe(listener)`, `subagentTranscript(agentId)`, `mcpStatus()`, `close()`.
 - `Turn`: async-iterable `AgentEvent`s, plus `id`, `steer()`, `interrupt()` and `result` (never rejects).
 - `AgentEvent`: see below. Events from a subagent carry its `agentId`.
 - Errors: `AgentEngineError` and its subclasses (`RuntimeAuthError`, `RuntimeCompatibilityError`, `SteerRejectedError`…).
@@ -73,11 +73,11 @@ While a turn runs, `turn.steer("…")` adds a message to it and `turn.interrupt(
 | `model`, `effort`, `fastMode` | thread and per-turn | SDK options and per-turn controls |
 | `access` (`full`, `ask`, `read-only`) | approval policy and sandbox | permission mode |
 | `instructions` | developer instructions | appended to Claude Code's system prompt |
-| `mcpServers` | per-thread `mcp_servers` config | SDK `mcpServers` (also in-process `sdk` servers) |
+| `mcpServers` | per-thread `mcp_servers` config | SDK `mcpServers` (also in-process `sdk` servers, and `alwaysLoad`) |
 | `env` | engine-wide only (`CodexEngineOptions.env`) | per thread |
 | `strictModel` | fails a silent model swap | same |
 
-Anything runtime-specific goes in `codex: {…}` (approval policy, sandbox, network, `config` overrides, host-answered `dynamicTools`, ephemeral) or `claude: {…}` (setting sources, built-in tools, allowed and disallowed tools, permission mode, skills, system prompt, and `extra` for any other SDK option).
+Anything runtime-specific goes in `codex: {…}` (approval policy, sandbox, network (also reasserted with the sandbox and approval policy on every turn), `config` overrides, host-answered `dynamicTools`, ephemeral) or `claude: {…}` (setting sources, built-in tools, allowed and disallowed tools, permission mode, skills, system prompt, and `extra` for any other SDK option).
 
 ### Events
 

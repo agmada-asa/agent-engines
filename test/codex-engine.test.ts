@@ -326,3 +326,42 @@ test("run() while a turn is active throws", async () => {
   assert.throws(() => thread.run("two"), /already running/);
   await engine.close();
 });
+
+test("the app-server runs in the engine's cwd and reports MCP servers before any thread", async () => {
+  const { spawn, children } = fakeSpawner(handlers({
+    "mcpServerStatus/list": () => ({ data: [{ name: "geo", tools: { search: {} }, runtimeStatus: "ready" }], nextCursor: null }),
+  }));
+  const cwds: string[] = [];
+  const engine = new CodexEngine({ cwd: "/tmp/job", spawnProcess: (command, args, options) => (cwds.push(options.cwd), spawn(command, args, options)) });
+  assert.deepEqual(await engine.mcpStatus(), [{ name: "geo", status: "ready", tools: ["search"] }]);
+  assert.deepEqual(cwds, ["/tmp/job"]);
+  assert.equal(children[0].requests("mcpServerStatus/list")[0].threadId, undefined);
+  assert.equal(children[0].requests("thread/start").length, 0);
+  await engine.close();
+});
+
+test("networkAccess reasserts the sandbox and approval policy on every turn", async () => {
+  const { spawn, children } = fakeSpawner(handlers());
+  const engine = new CodexEngine({ spawnProcess: spawn });
+  const locked = await engine.startThread({ cwd: "/tmp", access: "read-only", codex: { networkAccess: false } });
+  await locked.run("Hi").id;
+  const turn = children[0].requests("turn/start")[0];
+  assert.deepEqual(turn.sandboxPolicy, { type: "readOnly", networkAccess: false });
+  assert.equal(turn.approvalPolicy, "never");
+  await locked.close();
+  const plain = await engine.startThread({ cwd: "/tmp", access: "read-only" });
+  await plain.run("Hi").id;
+  const second = children[0].requests("turn/start")[1];
+  assert.equal(second.sandboxPolicy, undefined);
+  assert.equal(second.approvalPolicy, undefined);
+  await engine.close();
+});
+
+test("interruptTurn stops a turn by ID that this thread object did not start", async () => {
+  const { spawn, children } = fakeSpawner(handlers());
+  const engine = new CodexEngine({ spawnProcess: spawn });
+  const thread = await engine.resumeThread("saved", { cwd: "/tmp" });
+  await thread.interruptTurn("turn-from-before");
+  assert.deepEqual(children[0].requests("turn/interrupt")[0], { threadId: "saved", turnId: "turn-from-before" });
+  await engine.close();
+});

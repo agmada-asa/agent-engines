@@ -423,6 +423,10 @@ class ClaudeThread implements Thread {
     return { status: "unknown", text: reply?.kind === "message" ? reply.text : "" };
   }
 
+  async interruptTurn(turnId: string): Promise<void> {
+    if (this.current && !this.current.done && this.current.turnId === turnId) await this.current.interrupt();
+  }
+
   async mcpStatus(): Promise<McpServerState[]> {
     const query = await this.ready();
     return (await query.mcpServerStatus()).map((server) => ({
@@ -490,7 +494,11 @@ class ClaudeThread implements Thread {
     this.input?.end();
     this.cancelRequests();
     if (this.current && !this.current.done && !this.closed) {
-      this.failTurn(this.current, failure ?? new RuntimeConnectionError("Claude Code exited before the turn finished."));
+      // The SDK throws when the process dies; that is a lost connection, not the turn's own failure.
+      const lost = failure instanceof AgentEngineError
+        ? failure
+        : new RuntimeConnectionError(failure instanceof Error ? `Claude Code exited: ${failure.message}` : "Claude Code exited before the turn finished.", { cause: failure });
+      this.failTurn(this.current, lost);
     }
   }
 
@@ -709,13 +717,14 @@ function claudeMcpServers(servers: NonNullable<ThreadOptions["mcpServers"]>): Re
   const config: Record<string, McpServerConfig> = {};
   for (const [name, server] of Object.entries(servers)) {
     if (!/^[A-Za-z0-9_-]{1,64}$/u.test(name)) throw new AgentEngineError(`MCP server name ${JSON.stringify(name)} cannot be used safely.`);
+    const alwaysLoad = server.type !== "sdk" && server.alwaysLoad !== undefined ? { alwaysLoad: server.alwaysLoad } : {};
     if (server.type === "http") {
-      config[name] = { type: "http", url: server.url, ...(server.headers ? { headers: server.headers } : {}) };
+      config[name] = { type: "http", url: server.url, ...(server.headers ? { headers: server.headers } : {}), ...alwaysLoad };
     } else if (server.type === "sdk") {
       config[name] = server as McpServerConfig;
     } else {
       if (server.cwd) throw new AgentEngineError(`Claude cannot set a working directory for MCP server ${name}; wrap the command instead.`);
-      config[name] = { type: "stdio", command: server.command, args: server.args ?? [], ...(server.env ? { env: server.env } : {}) };
+      config[name] = { type: "stdio", command: server.command, args: server.args ?? [], ...(server.env ? { env: server.env } : {}), ...alwaysLoad };
     }
   }
   return config;

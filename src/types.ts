@@ -67,10 +67,14 @@ export interface ModelInfo {
  * An MCP server given to one thread. `sdk` is an in-process server made with the
  * Claude Agent SDK's `createSdkMcpServer`, passed as is; Claude only (Codex
  * answers host tools through `codex.dynamicTools` instead).
+ *
+ * `alwaysLoad` (Claude) puts every tool of the server in the prompt instead of
+ * deferring it behind tool search, which matters when tool search is not an
+ * allowed tool. Codex ignores it.
  */
 export type McpServer =
-  | { type?: "stdio"; command: string; args?: string[]; env?: Record<string, string>; cwd?: string }
-  | { type: "http"; url: string; headers?: Record<string, string> }
+  | { type?: "stdio"; command: string; args?: string[]; env?: Record<string, string>; cwd?: string; alwaysLoad?: boolean }
+  | { type: "http"; url: string; headers?: Record<string, string>; alwaysLoad?: boolean }
   | { type: "sdk"; name: string; instance: unknown };
 
 /** One MCP server as a thread sees it. */
@@ -118,7 +122,11 @@ export interface ThreadOptions {
 export interface CodexThreadOptions {
   approvalPolicy?: "untrusted" | "on-request" | "never";
   sandbox?: "read-only" | "workspace-write" | "danger-full-access";
-  /** Network inside the workspace-write and read-only sandboxes. */
+  /**
+   * Network inside the workspace-write and read-only sandboxes. When set, every
+   * turn also sends the matching sandbox policy and the thread's approval policy,
+   * so they are reasserted turn by turn.
+   */
   networkAccess?: boolean;
   /** Config overrides for this thread, as `codex --config` keys (`web_search`, `features.x`…). */
   config?: Record<string, unknown>;
@@ -196,6 +204,13 @@ export interface Thread {
    * Undefined before the first turn.
    */
   lastTurn(): Promise<LastTurn | undefined>;
+  /**
+   * Asks the runtime to stop a turn by ID, including one this object did not
+   * start: after a restart, `lastTurn()` can report a Codex turn still `running`.
+   * Claude stops its active turn when the ID matches; a turn from an earlier
+   * process cannot still be running, so anything else is a no-op.
+   */
+  interruptTurn(turnId: string): Promise<void>;
   /** The MCP servers this thread loaded, their state and tool names. No model call. */
   mcpStatus(): Promise<McpServerState[]>;
   /** Stops the thread's process (Claude) or unloads it (Codex). The thread can be resumed later. */

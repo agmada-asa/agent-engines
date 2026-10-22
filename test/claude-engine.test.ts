@@ -303,3 +303,42 @@ test("read-only access refuses writes", async () => {
   assert.deepEqual(queries[0].options.disallowedTools, ["Edit", "Write", "MultiEdit", "NotebookEdit", "Bash", "WebFetch"]);
   await engine.close();
 });
+
+test("a process that throws mid-turn fails it as a lost connection", async () => {
+  const { sdk } = fakeClaudeSdk({ onUser: (_message, query) => query.fail(new Error("Claude Code process exited with code 1")) });
+  const engine = new ClaudeEngine({ sdk });
+  const thread = await engine.startThread({ cwd: "/tmp" });
+  const result = await thread.run("hi").result;
+  assert.equal(result.status, "failed");
+  assert.equal(result.error?.kind, "connection");
+  assert.match(result.error?.message ?? "", /exited with code 1/);
+  await engine.close();
+});
+
+test("alwaysLoad reaches stdio and http servers", async () => {
+  const { sdk, queries } = fakeClaudeSdk();
+  const engine = new ClaudeEngine({ sdk });
+  await engine.startThread({
+    cwd: "/tmp",
+    mcpServers: { geo: { command: "/usr/bin/node", args: ["geo.js"], alwaysLoad: true }, remote: { type: "http", url: "https://x.test/mcp", alwaysLoad: false } },
+  });
+  assert.deepEqual(queries[0].options.mcpServers, {
+    geo: { type: "stdio", command: "/usr/bin/node", args: ["geo.js"], alwaysLoad: true },
+    remote: { type: "http", url: "https://x.test/mcp", alwaysLoad: false },
+  });
+  await engine.close();
+});
+
+test("interruptTurn stops the active turn by ID and ignores any other", async () => {
+  const { sdk, queries } = fakeClaudeSdk({
+    onInterrupt: (query) => query.emit({ type: "result", subtype: "error_during_execution", is_error: true, errors: [], modelUsage: {} }),
+  });
+  const engine = new ClaudeEngine({ sdk });
+  const thread = await engine.startThread({ cwd: "/tmp" });
+  const turn = thread.run("Wait");
+  await thread.interruptTurn("not-this-turn");
+  assert.equal(queries[0].calls.some((call) => call.method === "interrupt"), false);
+  await thread.interruptTurn(await turn.id);
+  assert.equal((await turn.result).status, "interrupted");
+  await engine.close();
+});
