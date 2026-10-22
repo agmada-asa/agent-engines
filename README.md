@@ -1,15 +1,19 @@
 # agent-engines
 
-One TypeScript layer for running coding agents on two runtimes:
+Run Codex and Claude agents from your own TypeScript app, on the subscriptions already signed in on the machine.
+
+agent-engines puts two runtimes behind one thread, turn and event API:
 
 - **Codex**, through `codex app-server` over stdio (JSON-RPC, typed with bindings generated from a pinned Codex CLI).
 - **Claude**, through the [Claude Agent SDK](https://www.npmjs.com/package/@anthropic-ai/claude-agent-sdk).
 
-Both sit behind the same thread, turn and event API, so an app can start or resume a thread, run a turn, steer it, interrupt it, compact it and read one event stream without caring which runtime is underneath.
+An app can start or resume a thread, run a turn, steer it, interrupt it, compact it and read one event stream without caring which runtime is underneath. Approvals and questions from the agent arrive as events to answer, and `usage()` reads the plan's limits without spending a turn.
+
+It runs the agents in [Blitz](https://github.com/agmada-asa/Blitz) and Ocean.
 
 It is the provider mechanics only. Which tools an agent may use, who approves what, retries, job leases and UI all stay in the app. Restrictive settings are available as presets you opt into, not defaults.
 
-It runs on the sign-ins already on the machine (`codex login`, `claude`). By default it refuses to run on an API key, so turns are never billed per token by accident; set `requireSubscription: false` to allow it.
+It uses the sign-ins from `codex login` and `claude`. By default it refuses to run on an API key, so turns are never billed per token by accident; set `requireSubscription: false` to allow it.
 
 ## Install
 
@@ -156,6 +160,8 @@ ACP agents (OpenCode and others) are left out for now. One would slot in as a th
 ## Development
 
 ```sh
+git clone https://github.com/agmada-asa/agent-engines
+cd agent-engines && npm install
 npm test            # unit tests with fake transports
 npm run typecheck
 AGENT_ENGINES_LIVE=1 npm run test:live   # real turns on cheap models, in a /tmp scratch dir
