@@ -1,7 +1,7 @@
 /**
  * @file The live smoke scenario both providers run: a turn that is steered, a
- * turn that is interrupted, a compaction, and a resume that remembers the first
- * turn. Prompts are tiny so a run costs a few cheap turns. Opt-in only: the
+ * turn that is interrupted, a resume that remembers the first turn, then a
+ * compaction. Prompts are tiny so a run costs a few cheap turns. Opt-in only: the
  * tests skip unless `AGENT_ENGINES_LIVE=1`.
  */
 
@@ -68,19 +68,22 @@ export async function smokeScenario(engine: Engine, thread: Omit<ThreadOptions, 
     assert.equal(b.result.status, "interrupted");
     assert.ok(Date.now() - started < 90_000, "the interrupt did not stop the command");
 
-    // Compact.
-    const c = await drive(first.compact());
-    log(summary("compact", c.events, c.result));
-    assert.notEqual(c.result.status, "failed");
-    assert.ok(c.events.some((event) => event.type === "compacted"), "no compacted event");
-
     // Resume in a fresh thread object; history stays with the runtime.
     await first.close();
     const resumed = await engine.resumeThread(first.id, options);
+    const last = await resumed.lastTurn();
+    log(`last turn after resume: ${JSON.stringify(last)}`);
+    assert.ok(last, "lastTurn found nothing after resume");
     const d = await drive(resumed.run("What single word did you reply with to my first request? Reply with just that word."));
     log(summary("resumed turn", d.events, d.result));
     assert.equal(d.result.status, "completed");
     assert.match(d.result.text, /banana/iu);
+
+    // Compact, on the resumed thread. Asked after this, the model only has its summary to go on, so nothing is asked.
+    const c = await drive(resumed.compact());
+    log(summary("compact", c.events, c.result));
+    assert.notEqual(c.result.status, "failed");
+    assert.ok(c.events.some((event) => event.type === "compacted"), "no compacted event");
 
     await engine.deleteThread(first.id, { cwd });
     log("deleted thread");

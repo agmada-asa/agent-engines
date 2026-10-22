@@ -118,6 +118,13 @@ export function fakeClaudeSdk(script: FakeClaudeScript = {}): { sdk: ClaudeSdk; 
     deleteSession: async (id: string, options?: { dir?: string }) => {
       deleted.push({ id, ...(options?.dir ? { dir: options.dir } : {}) });
     },
+    // Every session exists except "never-prompted".
+    getSessionInfo: async (id: string) => (id === "never-prompted" ? undefined : { sessionId: id, summary: "", lastModified: 0 }),
+    getSessionMessages: async () => [
+      { type: "user", uuid: "1", session_id: "s", parent_tool_use_id: null, parent_agent_id: null, message: { role: "user", content: "Hi" } },
+      { type: "assistant", uuid: "2", session_id: "s", parent_tool_use_id: "task-1", parent_agent_id: null, message: { role: "assistant", content: [{ type: "text", text: "From a subagent" }] } },
+      { type: "assistant", uuid: "3", session_id: "s", parent_tool_use_id: null, parent_agent_id: null, message: { role: "assistant", content: [{ type: "text", text: "Hello" }] } },
+    ],
     getSubagentMessages: async () => [
       { type: "user", uuid: "1", session_id: "s", parent_tool_use_id: null, parent_agent_id: null, message: { role: "user", content: "Find the file" } },
       { type: "assistant", uuid: "2", session_id: "s", parent_tool_use_id: null, parent_agent_id: null, message: { role: "assistant", content: [{ type: "tool_use", id: "tu", name: "Glob", input: { pattern: "*.md" } }] } },

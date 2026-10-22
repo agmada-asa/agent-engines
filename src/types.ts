@@ -189,6 +189,13 @@ export interface Thread {
   subscribe(listener: (event: AgentEvent) => void): () => void;
   /** A subagent's transcript so far, by the `agentId` its events carried. */
   subagentTranscript(agentId: string): Promise<TranscriptEntry[]>;
+  /**
+   * How the thread's last turn ended, read back from the runtime: for picking up
+   * after a restart. Codex records the status. Claude's transcript does not, so
+   * a turn this object did not run reports `unknown` with its last reply.
+   * Undefined before the first turn.
+   */
+  lastTurn(): Promise<LastTurn | undefined>;
   /** The MCP servers this thread loaded, their state and tool names. No model call. */
   mcpStatus(): Promise<McpServerState[]>;
   /** Stops the thread's process (Claude) or unloads it (Codex). The thread can be resumed later. */
@@ -206,6 +213,14 @@ export interface Turn extends AsyncIterable<AgentEvent> {
   interrupt(): Promise<void>;
   /** Settles when the turn ends, however it ends. Never rejects. */
   readonly result: Promise<TurnResult>;
+}
+
+/** The last turn on a thread, as `Thread.lastTurn` reads it. */
+export interface LastTurn {
+  turnId?: string;
+  status: "completed" | "interrupted" | "failed" | "running" | "unknown";
+  /** The agent's last message in that turn; empty when it sent none. */
+  text: string;
 }
 
 /** How a turn ended. */

@@ -40,6 +40,7 @@ import type {
   AgentRequest,
   Availability,
   Engine,
+  LastTurn,
   McpServerState,
   ModelInfo,
   Thread,
@@ -65,7 +66,7 @@ const PROBE_TIMEOUT_MS = 30_000;
 const WRITE_TOOLS = ["Edit", "Write", "MultiEdit", "NotebookEdit", "Bash"];
 
 /** The SDK functions the engine uses; tests inject a fake. */
-export type ClaudeSdk = Readonly<Pick<typeof sdkModule, "query" | "deleteSession" | "getSubagentMessages">>;
+export type ClaudeSdk = Readonly<Pick<typeof sdkModule, "query" | "deleteSession" | "getSubagentMessages" | "getSessionInfo" | "getSessionMessages">>;
 
 /** Engine-wide settings for Claude. */
 export interface ClaudeEngineOptions {
@@ -214,7 +215,9 @@ export class ClaudeEngine implements Engine {
   }
 
   async resumeThread(threadId: string, options: ThreadOptions): Promise<Thread> {
-    const thread = new ClaudeThread(this, this.sdk, options, threadId, true);
+    // A session is written only once a prompt reaches Claude; one that never got one opens fresh under the same ID.
+    const exists = await Promise.resolve().then(() => this.sdk.getSessionInfo(threadId, { dir: options.cwd })).then(Boolean, () => true);
+    const thread = new ClaudeThread(this, this.sdk, options, threadId, exists);
     await thread.open();
     this.threads.add(thread);
     return thread;
@@ -318,6 +321,7 @@ class ClaudeThread implements Thread {
   private query?: Query;
   private input?: InputQueue;
   private current?: TurnHandle;
+  private last?: LastTurn;
   private interruptRequested = false;
   private lastText = "";
   private expectedModel?: string;
@@ -401,6 +405,16 @@ class ClaudeThread implements Thread {
   async subagentTranscript(agentId: string): Promise<TranscriptEntry[]> {
     const messages = await this.sdk.getSubagentMessages(this.id, agentId, { dir: this.options.cwd });
     return claudeTranscript(messages);
+  }
+
+  async lastTurn(): Promise<LastTurn | undefined> {
+    if (this.current && !this.current.done) return { turnId: this.current.turnId!, status: "running", text: "" };
+    if (this.last) return this.last;
+    const messages = await this.sdk.getSessionMessages(this.id, { dir: this.options.cwd }).catch(() => []);
+    const entries = claudeTranscript(messages.filter((message) => !message.parent_tool_use_id));
+    if (!entries.length) return undefined;
+    const reply = [...entries].reverse().find((entry) => entry.kind === "message" && entry.role === "assistant");
+    return { status: "unknown", text: reply?.kind === "message" ? reply.text : "" };
   }
 
   async mcpStatus(): Promise<McpServerState[]> {
@@ -517,6 +531,7 @@ class ClaudeThread implements Thread {
       : { ...base, type: "turn.completed", status: outcome.status, text: outcome.text ?? (outcome.status === "interrupted" ? this.lastText : ""), ...usage };
     this.dispatch(event);
     this.cancelRequests();
+    this.last = { turnId: base.turnId, status: outcome.status, text: event.type === "turn.completed" ? event.text : "" };
     turn.finish({
       ...base,
       status: outcome.status,

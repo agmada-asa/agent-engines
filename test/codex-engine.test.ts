@@ -304,6 +304,20 @@ test("deleteThread finds subagents from earlier runs through thread/list", async
   await engine.close();
 });
 
+test("lastTurn reads the latest turn's status and reply from Codex", async () => {
+  const { spawn, children } = fakeSpawner(handlers({
+    "thread/turns/list": () => ({
+      data: [{ id: "turn-7", status: "interrupted", items: [{ type: "agentMessage", id: "m1", text: "Partial" }, { type: "commandExecution", id: "c1" }], error: null }],
+      nextCursor: null, backwardsCursor: null,
+    }),
+  }));
+  const engine = new CodexEngine({ spawnProcess: spawn });
+  const thread = await engine.resumeThread(THREAD, { cwd: "/tmp" });
+  assert.deepEqual(await thread.lastTurn(), { turnId: "turn-7", status: "interrupted", text: "Partial" });
+  assert.deepEqual(children[0].requests("thread/turns/list")[0], { threadId: THREAD, sortDirection: "desc", limit: 1, itemsView: "full" });
+  await engine.close();
+});
+
 test("run() while a turn is active throws", async () => {
   const { spawn } = fakeSpawner(handlers());
   const engine = new CodexEngine({ spawnProcess: spawn });

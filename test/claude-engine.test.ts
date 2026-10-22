@@ -241,6 +241,23 @@ test("subagent transcripts and resumeThread", async () => {
   const transcript = await thread.subagentTranscript("agent-1");
   assert.equal(transcript.length, 3);
   assert.deepEqual(transcript[1], { kind: "tool", tool: { kind: "builtin", name: "Glob", input: { pattern: "*.md" } }, output: "README.md" });
+  // Read back from the transcript, which records no status.
+  assert.deepEqual(await thread.lastTurn(), { status: "unknown", text: "Hello" });
+  // A session that never got a prompt is opened fresh under its ID.
+  await engine.resumeThread("never-prompted", { cwd: "/tmp" });
+  assert.equal(queries[1].options.sessionId, "never-prompted");
+  assert.equal(queries[1].options.resume, undefined);
+  await engine.close();
+});
+
+test("lastTurn reports a turn this thread ran", async () => {
+  const { sdk } = fakeClaudeSdk({ onUser: (_message, query) => replyMessages("Done").forEach((m) => query.emit(m)) });
+  const engine = new ClaudeEngine({ sdk });
+  const thread = await engine.startThread({ cwd: "/tmp" });
+  const turn = thread.run("Hi");
+  assert.equal((await thread.lastTurn())?.status, "running");
+  await turn.result;
+  assert.deepEqual(await thread.lastTurn(), { turnId: await turn.id, status: "completed", text: "Done" });
   await engine.close();
 });
 

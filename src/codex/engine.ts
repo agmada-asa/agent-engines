@@ -23,6 +23,7 @@ import type {
   AgentEvent,
   Availability,
   Engine,
+  LastTurn,
   McpServerState,
   ModelInfo,
   Thread,
@@ -462,6 +463,16 @@ class CodexThread implements Thread {
       if (!cursor) break;
     }
     return entries;
+  }
+
+  async lastTurn(): Promise<LastTurn | undefined> {
+    if (this.current && !this.current.done) return { ...(this.current.turnId ? { turnId: this.current.turnId } : {}), status: "running", text: "" };
+    const client = await this.ready();
+    const response = await client.request<ThreadTurnsListResponse>("thread/turns/list", { threadId: this.id, sortDirection: "desc", limit: 1, itemsView: "full" });
+    const turn = response.data[0];
+    if (!turn) return undefined;
+    const message = [...turn.items].reverse().find((item) => item.type === "agentMessage") as { text?: string } | undefined;
+    return { turnId: turn.id, status: turn.status === "inProgress" ? "running" : turn.status, text: message?.text ?? "" };
   }
 
   async mcpStatus(): Promise<McpServerState[]> {
