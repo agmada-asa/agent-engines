@@ -1,0 +1,43 @@
+# Checks agent-engines against the latest published Codex and Claude Code.
+#
+# Both CLIs release on their own schedule. This installs their newest
+# versions each week and runs `npm run check:runtimes -- --ci`, which fails
+# when Codex drops below the pinned protocol version or its app-server no
+# longer has a method or enum value the engines use (src/compat.ts).
+#
+# The runner is not signed in, so sign-in and model catalogues are skipped
+# here. Run `npm run check:runtimes` locally for those.
+
+name: Runtimes
+
+on:
+  schedule:
+    # Mondays at 06:00 UTC.
+    - cron: "0 6 * * 1"
+  workflow_dispatch:
+  pull_request:
+    paths:
+      - "src/**"
+      - "scripts/check-runtimes.ts"
+      - ".github/workflows/runtimes.yml"
+
+permissions:
+  contents: read
+
+jobs:
+  check:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v5
+      - uses: actions/setup-node@v5
+        with:
+          node-version: 24
+      - run: npm ci
+      - run: npm run typecheck
+      - run: npm test
+      # Latest on purpose: the point is to find drift before a local update does.
+      - name: Install the latest CLIs
+        run: npm install --global --allow-scripts=@anthropic-ai/claude-code @openai/codex@latest @anthropic-ai/claude-code@latest
+      - name: Check runtimes
+        run: npm run check:runtimes -- --ci
