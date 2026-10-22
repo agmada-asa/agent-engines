@@ -147,3 +147,17 @@ test("parseServerVersion and refusalFor", () => {
   assert.deepEqual(refusalFor("item/fileChange/requestApproval"), { decision: "decline" });
   assert.equal(refusalFor("unknown/method"), undefined);
 });
+
+test("a child that exits during startup is reported with its stderr tail", async () => {
+  const { spawn } = fakeSpawner({ initialize: () => NO_REPLY });
+  const spawnProcess: typeof spawn = (command, args, options) => {
+    const child = spawn(command, args, options) as unknown as { stderr: { emit(event: string, data: unknown): void }; exit(): void };
+    setImmediate(() => {
+      child.stderr.emit("data", "Error: invalid transport");
+      child.exit();
+    });
+    return child as never;
+  };
+  await assert.rejects(CodexClient.connect({ cwd: "/tmp", spawnProcess }), (error: unknown) =>
+    error instanceof RuntimeConnectionError && /invalid transport/.test(error.message));
+});
