@@ -101,8 +101,10 @@ export interface Capabilities {
   rewind: boolean;
   /**
    * `Thread.rewind` with `files: true` also restores the files those turns
-   * changed. Claude needs `fileCheckpoints: true` on the thread; Codex leaves
-   * files to the app (a git checkpoint, say).
+   * changed. Claude needs `fileCheckpoints: true` on the thread. Codex restores
+   * a git snapshot the engine took before the turn when the thread has
+   * `fileCheckpoints` and its folder is in a git repository, and otherwise
+   * undoes the edits Codex recorded.
    */
   rewindFiles: boolean;
   /** `listThreads`, `readThread` and `Thread.history`. */
@@ -223,8 +225,13 @@ export interface HistoryTurn {
 export interface RewindResult {
   /** Turns dropped from the conversation. */
   droppedTurns: number;
-  /** For `files: true`: the files restored, and how much changed. */
-  files?: { paths: string[]; insertions?: number; deletions?: number };
+  /**
+   * For `files: true`: the files put back, and how. `checkpoint` restored the
+   * runtime's or the engine's own snapshot; `edits` undid the recorded edits,
+   * which leaves files a shell command wrote, and `skipped` lists files whose
+   * text no longer matched.
+   */
+  files?: { paths: string[]; insertions?: number; deletions?: number; method?: "checkpoint" | "edits"; skipped?: string[] };
 }
 
 /** A sign-in started by `Engine.login`. */
@@ -440,8 +447,10 @@ export interface ThreadOptions {
   /** Folders the agent may use besides `cwd`, as absolute paths. */
   additionalDirectories?: string[];
   /**
-   * Keep a copy of each file before the agent changes it, so `rewind` can put
-   * files back (Claude file checkpointing). Off by default.
+   * Keep a copy of the files before each turn, so `rewind` can put them back:
+   * Claude's file checkpointing, or on Codex a git snapshot of the folder before
+   * each turn this library starts (the folder must be in a git repository).
+   * Off by default.
    */
   fileCheckpoints?: boolean;
   /**

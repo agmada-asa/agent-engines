@@ -905,6 +905,7 @@ class ClaudeThread implements Thread {
       const result = await (await this.ready()).rewindFiles(beforeTurnId);
       if (!result.canRewind) throw new AgentEngineError(`Claude could not put the files back: ${result.error ?? "no checkpoint for that turn"}.`);
       files = {
+        method: "checkpoint",
         paths: result.filesChanged ?? [],
         ...(result.insertions !== undefined ? { insertions: result.insertions } : {}),
         ...(result.deletions !== undefined ? { deletions: result.deletions } : {}),

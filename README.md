@@ -108,7 +108,7 @@ const opencode = createEngine("acp", ACP_AGENTS.opencode); // or { command: "my-
 | `limits` | not supported | `maxTurns`, `maxBudgetUsd`, task budget | not supported |
 | `agents` | agent roles (`agents.<name>` config with a role file) | SDK `agents` | not supported |
 | `additionalDirectories` | workspace sandbox writable roots | SDK `additionalDirectories` | sent when the agent takes them |
-| `fileCheckpoints` | ignored (no file rewind) | file checkpointing, for `rewind({ files: true })` | ignored |
+| `fileCheckpoints` | a git snapshot of the folder before each turn, for `rewind({ files: true })` | file checkpointing, for `rewind({ files: true })` | ignored |
 | `seed` | injected as history | put before the first message | put before the first message |
 | `fallbackModels`, `promptSuggestions`, `progressSummaries` | ignored | SDK `fallbackModel`, `promptSuggestions`, `agentProgressSummaries` | ignored |
 
@@ -184,7 +184,7 @@ Network failures have kind `connection`. Authentication and context errors stay 
 | --- | --- | --- | --- |
 | steer, compact | yes | yes | no |
 | fork | yes, through any turn | yes, through any turn | whole session, if the agent offers it |
-| rewind | conversation only | conversation, and files with `fileCheckpoints` | no |
+| rewind | conversation, and files: a git snapshot per turn with `fileCheckpoints`, else the recorded edits undone | conversation, and files with `fileCheckpoints` | no |
 | list and read threads | yes | yes | if the agent can list and load sessions |
 | rename, archive | both | rename only | no |
 | plan mode | yes | yes | if the agent has a plan mode |
@@ -207,11 +207,16 @@ const turns = await thread.history(); // [{ id, status, entries: TranscriptEntry
 const branch = await engine.forkThread(thread.id, { cwd, throughTurnId: turns[0].id });
 
 // Edit an earlier prompt: rewind to before it, then send the new text.
-await thread.rewind(turns[1].id, { files: true }); // files: Claude with fileCheckpoints only
+await thread.rewind(turns[1].id, { files: true });
 await thread.run("The edited prompt");
 ```
 
-Codex rewinds the conversation only; put files back from a git checkpoint in the app. Claude cannot rewind past its first turn (start a new thread instead). `listThreads({ cwd, search, limit })` lists threads newest first, including ones started outside this library; Codex leaves subagents out.
+Files come back in one of two ways, reported as `files.method`:
+
+- `checkpoint`: Claude's own file checkpoints (`fileCheckpoints: true`), or on Codex a git snapshot the engine takes before each turn when the thread has `fileCheckpoints` and its folder is in a git repository. The snapshot goes into git's object store through a temporary index, so branches, the index and the working tree are not touched, and its ID is kept under the repository's git folder. A rewind restores whatever changed in the thread's folder since then, including files a shell command wrote, and anyone else's edits there in the meantime. Untracked files over 10 MB are left out.
+- `edits` (Codex without a snapshot): the edits Codex recorded in the dropped turns are undone, newest first. Files a shell command wrote are left as they are, and a file whose text has changed since is listed in `files.skipped`.
+
+Codex itself only rewinds the conversation, and turns the agent starts on its own (a goal's follow-on turns) get no snapshot. Claude cannot rewind past its first turn (start a new thread instead). `listThreads({ cwd, search, limit })` lists threads newest first, including ones started outside this library; Codex leaves subagents out.
 
 ### Plan mode and access per turn
 
@@ -310,7 +315,7 @@ npm run typecheck
 AGENT_ENGINES_LIVE=1 npm run test:live   # real turns on cheap models, in a /tmp scratch dir
 ```
 
-The live tests run a steered turn, an interrupted turn, a resume, a compaction and a delete on each runtime, plus a Claude question round trip. A second scenario checks plan mode, structured output, context usage, history, rename, fork, rewind (with files on Claude), a handoff seed and a review. Override the models with `AGENT_ENGINES_CLAUDE_MODEL` and `AGENT_ENGINES_CODEX_MODEL`.
+The live tests run a steered turn, an interrupted turn, a resume, a compaction and a delete on each runtime, plus a Claude question round trip. A second scenario checks plan mode, structured output, context usage, history, rename, fork, rewind with files, a handoff seed and a review. Override the models with `AGENT_ENGINES_CLAUDE_MODEL` and `AGENT_ENGINES_CODEX_MODEL`.
 
 ## Licence
 

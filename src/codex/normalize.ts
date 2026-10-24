@@ -158,7 +158,7 @@ function toolOutcome(item: Json): { output?: string; isError: boolean } {
  * File changes from a `fileChange` item. Codex sends an update as unified hunks
  * but a new or deleted file as its whole text; both become hunks here.
  */
-function fileChanges(item: Json): FileChange[] {
+export function fileChanges(item: Json): FileChange[] {
   const changes: FileChange[] = [];
   for (const change of Array.isArray(item.changes) ? item.changes : []) {
     // PatchChangeKind is { type: "add" | "delete" } or { type: "update", move_path }.

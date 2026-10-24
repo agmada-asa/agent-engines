@@ -87,7 +87,7 @@ test("rewind restores files at the prompt, then resumes the session from just be
   const thread = await engine.resumeThread("s1", { cwd: "/tmp", fileCheckpoints: true });
   assert.equal(queries[0]!.options.enableFileCheckpointing, true);
   const result = await thread.rewind("turn-b", { files: true });
-  assert.deepEqual(result, { droppedTurns: 1, files: { paths: ["/tmp/a.ts"], insertions: 2, deletions: 1 } });
+  assert.deepEqual(result, { droppedTurns: 1, files: { method: "checkpoint", paths: ["/tmp/a.ts"], insertions: 2, deletions: 1 } });
   assert.deepEqual(queries[0]!.calls.find((call) => call.method === "rewindFiles")!.args, ["turn-b", undefined]);
   assert.equal(queries[0]!.closed, true);
   assert.equal(queries[1]!.options.resume, "s1");

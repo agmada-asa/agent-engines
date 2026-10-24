@@ -63,7 +63,7 @@ test("capabilities() describes Codex", async () => {
   const engine = new CodexEngine({ spawnProcess: fakeSpawner().spawn });
   const capabilities = await engine.capabilities();
   assert.equal(capabilities.fork, true);
-  assert.equal(capabilities.rewindFiles, false);
+  assert.equal(capabilities.rewindFiles, true);
   assert.equal(capabilities.review, "native");
   assert.deepEqual(capabilities.modes, ["default", "plan"]);
   await engine.close();
@@ -112,7 +112,7 @@ test("readThread and history() give each turn's entries, file changes included",
     entries: [
       { kind: "message", role: "user", text: "Add a test" },
       { kind: "tool", tool: { kind: "command", name: "shell", input: { command: "npm test", cwd: "/work" } }, output: "ok" },
-      { kind: "files", changes: [{ path: "/work/a.test.ts", kind: "add" }] },
+      { kind: "files", changes: [{ path: "/work/a.test.ts", kind: "add", diff: "@@ -0,0 +1,1 @@\n+x" }] },
       { kind: "message", role: "assistant", text: "Added it." },
     ],
   });
@@ -133,13 +133,12 @@ test("rename, archive and unarchive call Codex", async () => {
   await engine.close();
 });
 
-test("rewind reverts the conversation before a turn and refuses to promise files", async () => {
+test("rewind reverts the conversation before a turn", async () => {
   const { spawn, children } = fakeSpawner(handlers({ "thread/revert": () => ({ thread: threadRecord(THREAD), turnsBackwardsCursor: null, itemsBackwardsCursor: null }) }));
   const engine = new CodexEngine({ spawnProcess: spawn });
   const thread = await engine.resumeThread(THREAD, { cwd: "/work" });
   assert.deepEqual(await thread.rewind("turn-1"), { droppedTurns: 2 });
   assert.deepEqual(children[0]!.requests("thread/revert"), [{ threadId: THREAD, beforeTurnId: "turn-1" }]);
-  await assert.rejects(thread.rewind("turn-1", { files: true }), UnsupportedFeatureError);
   await assert.rejects(thread.rewind("turn-9"), /No turn turn-9/u);
   await engine.close();
 });

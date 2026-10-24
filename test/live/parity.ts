@@ -7,6 +7,7 @@
  */
 
 import assert from "node:assert/strict";
+import { execFileSync } from "node:child_process";
 import { access, mkdtemp, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -20,6 +21,8 @@ async function exists(path: string): Promise<boolean> {
 /** The scenario. `thread` holds provider-specific settings such as a cheap model. */
 export async function parityScenario(engine: Engine, thread: Omit<ThreadOptions, "cwd">, log: (line: string) => void): Promise<void> {
   const cwd = await mkdtemp(join(tmpdir(), `agent-engines-parity-${engine.provider}-`));
+  // A repository, so Codex can snapshot the folder before each turn.
+  execFileSync("git", ["init", "-q"], { cwd });
   const capabilities = await engine.capabilities();
   const options: ThreadOptions = { ...thread, cwd, access: "full", ...(capabilities.rewindFiles ? { fileCheckpoints: true } : {}) };
   const created: string[] = [];

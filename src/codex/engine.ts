@@ -20,6 +20,7 @@ import {
   SteerRejectedError,
   UnsupportedFeatureError,
 } from "../errors.ts";
+import { CheckpointStore, restoreTree, reverseChanges, snapshotTree } from "../checkpoints.ts";
 import { attachedFilesNote, saveAttachment } from "../files.ts";
 import { responsesItems } from "../handoff.ts";
 import { TurnHandle, emitTo, inputParts, parseOutput } from "../turn.ts";
@@ -71,7 +72,7 @@ import {
   type CodexNotification,
   type SpawnCodexProcess,
 } from "./client.ts";
-import { CodexNormalizer, codexGoal, codexRequest, codexTool, type PendingCodexRequest } from "./normalize.ts";
+import { CodexNormalizer, codexGoal, codexRequest, codexTool, fileChanges, type PendingCodexRequest } from "./normalize.ts";
 import type { FuzzyFileSearchResponse } from "./protocol/FuzzyFileSearchResponse.ts";
 import type { ConfigReadResponse } from "./protocol/v2/ConfigReadResponse.ts";
 import type { GetAccountRateLimitsResponse } from "./protocol/v2/GetAccountRateLimitsResponse.ts";
@@ -118,7 +119,7 @@ export const CODEX_CAPABILITIES: Capabilities = {
   compact: true,
   fork: true,
   rewind: true,
-  rewindFiles: false,
+  rewindFiles: true,
   history: true,
   rename: true,
   archive: true,
@@ -891,6 +892,7 @@ class CodexThread implements Thread {
   private mode?: ThreadMode;
   /** The mode last sent to Codex on this connection. */
   private appliedMode?: ThreadMode;
+  private checkpoints?: Promise<CheckpointStore | undefined>;
 
   constructor(
     private readonly engine: CodexEngine,
@@ -1011,8 +1013,10 @@ class CodexThread implements Thread {
     void (async () => {
       try {
         const client = await this.ready();
+        const tree = await this.snapshot();
         const response = await client.request<ReviewStartResponse>("review/start", { threadId: this.id, target: reviewTarget(target), delivery: "inline" });
         turn.setId(response.turn.id);
+        await this.keepSnapshot(response.turn.id, tree);
         if (!this.normalizer.currentTurnId) this.normalizer.currentTurnId = response.turn.id;
       } catch (error) {
         this.failTurn(turn, error);
@@ -1053,15 +1057,51 @@ class CodexThread implements Thread {
     return listMcpServers(await this.ready(), this.id);
   }
 
+  /**
+   * Codex rewinds only the conversation, so files are put back here first:
+   * from the snapshot taken before `beforeTurnId` when there is one, else by
+   * undoing the edits Codex recorded in the dropped turns, newest first.
+   */
   async rewind(beforeTurnId: string, options: { files?: boolean } = {}): Promise<RewindResult> {
-    if (options.files) throw new UnsupportedFeatureError("put files back on rewind", "Codex", "it rewinds the conversation only; restore files from a git checkpoint");
     if (this.activeTurn) throw new AgentEngineError("A turn is running; rewind after it ends.");
     const client = await this.ready();
     const turns = await threadTurns(client, this.id);
     const index = turns.findIndex((turn) => turn.id === beforeTurnId);
     if (index < 0) throw new AgentEngineError(`No turn ${beforeTurnId} on this thread.`);
+    const dropped = turns.slice(index);
+    let files: RewindResult["files"];
+    if (options.files) {
+      const store = await this.checkpointStore();
+      const tree = store?.get(beforeTurnId);
+      if (tree) {
+        files = { ...(await restoreTree(this.options.cwd, tree)), method: "checkpoint" };
+      } else {
+        const changes = [...dropped].reverse().flatMap((turn) =>
+          [...turn.entries].reverse().flatMap((entry) => (entry.kind === "files" ? [...entry.changes].reverse() : [])));
+        const reversed = await reverseChanges(changes);
+        files = { paths: reversed.paths, method: "edits", ...(reversed.skipped.length ? { skipped: reversed.skipped } : {}) };
+      }
+    }
     await client.request("thread/revert", { threadId: this.id, beforeTurnId });
-    return { droppedTurns: turns.length - index };
+    await (await this.checkpointStore())?.forget(dropped.map((turn) => turn.id));
+    return { droppedTurns: dropped.length, ...(files ? { files } : {}) };
+  }
+
+  /** Where this thread's snapshots are recorded; undefined outside a git repository. */
+  private checkpointStore(): Promise<CheckpointStore | undefined> {
+    this.checkpoints ??= CheckpointStore.open(this.options.cwd, this.id).catch(() => undefined);
+    return this.checkpoints;
+  }
+
+  /** With `fileCheckpoints`, a snapshot of the folder before a turn; undefined when there is none to take. */
+  private async snapshot(): Promise<string | undefined> {
+    if (!this.options.fileCheckpoints || !(await this.checkpointStore())) return undefined;
+    return snapshotTree(this.options.cwd).catch(() => undefined);
+  }
+
+  /** Records the snapshot taken before `turnId`. */
+  private async keepSnapshot(turnId: string, tree: string | undefined): Promise<void> {
+    if (tree) await (await this.checkpointStore())?.set(turnId, tree).catch(() => undefined);
   }
 
   async history(): Promise<HistoryTurn[]> {
@@ -1270,8 +1310,10 @@ class CodexThread implements Thread {
         await client.request("thread/settings/update", settings);
         this.appliedMode = this.mode;
       }
+      const tree = await this.snapshot();
       const response = await client.request<TurnStartResponse>("turn/start", params);
       turn.setId(response.turn.id);
+      await this.keepSnapshot(response.turn.id, tree);
       if (!this.normalizer.currentTurnId) this.normalizer.currentTurnId = response.turn.id;
     } catch (error) {
       this.failTurn(turn, error);
@@ -1387,8 +1429,10 @@ function transcriptEntries(item: Record<string, any>): TranscriptEntry[] {
       return text ? [{ kind: "reasoning", text }] : [];
     }
     case "fileChange": {
-      if (item.status !== "completed" || !Array.isArray(item.changes) || !item.changes.length) return [];
-      return [{ kind: "files", changes: item.changes.map((change: any) => ({ path: String(change.path), kind: change?.kind?.type === "add" || change?.kind === "add" ? "add" : change?.kind?.type === "delete" || change?.kind === "delete" ? "delete" : "update" })) }];
+      // Diffs are kept, so a rewind can undo the edits.
+      if (item.status !== "completed") return [];
+      const changes = fileChanges(item);
+      return changes.length ? [{ kind: "files", changes }] : [];
     }
     default: {
       const tool = codexTool(item);

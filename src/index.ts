@@ -50,6 +50,7 @@ export { AcpNormalizer, acpTool } from "./acp/normalize.ts";
 export { renderTranscript, responsesItems, seedPreamble } from "./handoff.ts";
 export { fuzzyScore, localFileSearch } from "./files.ts";
 export { unifiedDiff } from "./diff.ts";
+export { CheckpointStore, gitRepository, restoreTree, reverseChanges, reverseDiff, snapshotTree } from "./checkpoints.ts";
 export { reviewPrompt } from "./review.ts";
 export {
   CodexClient,
