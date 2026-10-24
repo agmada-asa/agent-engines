@@ -24,6 +24,7 @@ import type {
   TranscriptEntry,
   TurnError,
 } from "../types.ts";
+import { hunksDiff, wholeFileDiff } from "../diff.ts";
 
 type Json = Record<string, any>;
 
@@ -410,16 +411,18 @@ export class ClaudeNormalizer {
   }
 }
 
-/** The file a successful Edit/Write call changed. */
+/** The file a successful Edit, MultiEdit, Write or NotebookEdit call changed, from its result. */
 function fileChange(tool: ToolCall, result: Json | undefined): FileChange | undefined {
   const input = record(tool.input) ?? {};
-  const path = result?.filePath ?? input.file_path ?? input.notebook_path;
+  const path = result?.filePath ?? result?.notebook_path ?? input.file_path ?? input.notebook_path;
   if (typeof path !== "string") return undefined;
-  const kind = result?.type === "create" ? "add" : "update";
-  const patch = Array.isArray(result?.structuredPatch)
-    ? result.structuredPatch.map((hunk: Json) => [`@@ -${hunk.oldStart},${hunk.oldLines} +${hunk.newStart},${hunk.newLines} @@`, ...(hunk.lines ?? [])].join("\n")).join("\n")
-    : undefined;
-  return { path, kind, ...(patch ? { diff: patch } : {}) };
+  if (result?.type === "create") {
+    const content = typeof result.content === "string" ? result.content : typeof input.content === "string" ? input.content : "";
+    const diff = wholeFileDiff("+", content);
+    return { path, kind: "add", ...(diff ? { diff } : {}) };
+  }
+  const diff = Array.isArray(result?.structuredPatch) ? hunksDiff(result.structuredPatch) : "";
+  return { path, kind: "update", ...(diff ? { diff } : {}) };
 }
 
 /** Stored session messages (a subagent's transcript) as transcript entries. */

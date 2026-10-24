@@ -20,6 +20,7 @@ import type {
   ToolCall,
   TurnError,
 } from "../types.ts";
+import { wholeFileDiff } from "../diff.ts";
 
 type Json = Record<string, any>;
 
@@ -152,16 +153,24 @@ function toolOutcome(item: Json): { output?: string; isError: boolean } {
   }
 }
 
-/** File changes from a `fileChange` item. */
+/**
+ * File changes from a `fileChange` item. Codex sends an update as unified hunks
+ * but a new or deleted file as its whole text; both become hunks here.
+ */
 function fileChanges(item: Json): FileChange[] {
   const changes: FileChange[] = [];
   for (const change of Array.isArray(item.changes) ? item.changes : []) {
-    // PatchChangeKind is { type: "add" | "delete" | "update" }.
-    const kind = typeof change?.kind === "string" ? change.kind : (record(change?.kind)?.type ?? "update");
+    // PatchChangeKind is { type: "add" | "delete" } or { type: "update", move_path }.
+    const kindRecord = record(change?.kind);
+    const kind = typeof change?.kind === "string" ? change.kind : (kindRecord?.type ?? "update");
+    const text = typeof change?.diff === "string" ? change.diff : "";
+    const diff = kind === "add" ? wholeFileDiff("+", text) : kind === "delete" ? wholeFileDiff("-", text) : text;
+    const movedTo = kindRecord?.move_path;
     changes.push({
       path: String(change.path),
       kind: kind === "add" ? "add" : kind === "delete" ? "delete" : "update",
-      ...(typeof change.diff === "string" && change.diff ? { diff: change.diff } : {}),
+      ...(typeof movedTo === "string" && movedTo ? { movedTo } : {}),
+      ...(diff ? { diff } : {}),
     });
   }
   return changes;

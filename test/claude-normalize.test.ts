@@ -56,11 +56,31 @@ test("tool use and results, with file changes from Edit and Write", () => {
   ]);
   const bash = n.normalize(msg({ type: "user", parent_tool_use_id: null, message: { role: "user", content: [{ type: "tool_result", tool_use_id: "b1", content: "a\nb", is_error: false }] } }), "t");
   assert.deepEqual(bash, [{ threadId: S, turnId: "t", type: "tool.completed", itemId: "b1", tool: { kind: "command", name: "Bash", input: { command: "ls" } }, output: "a\nb", isError: false }]);
-  const write = n.normalize(msg({ type: "user", parent_tool_use_id: null, tool_use_result: { type: "create", filePath: "/tmp/new.txt" }, message: { role: "user", content: [{ type: "tool_result", tool_use_id: "w1", content: [{ type: "text", text: "File created" }] }] } }), "t");
+  const write = n.normalize(msg({ type: "user", parent_tool_use_id: null, tool_use_result: { type: "create", filePath: "/tmp/new.txt", content: "x\ny\n", structuredPatch: [] }, message: { role: "user", content: [{ type: "tool_result", tool_use_id: "w1", content: [{ type: "text", text: "File created" }] }] } }), "t");
   assert.equal(write[0].type, "tool.completed");
-  assert.deepEqual(write[1], { threadId: S, turnId: "t", type: "file.changed", itemId: "w1", changes: [{ path: "/tmp/new.txt", kind: "add" }] });
+  assert.deepEqual(write[1], { threadId: S, turnId: "t", type: "file.changed", itemId: "w1", changes: [{ path: "/tmp/new.txt", kind: "add", diff: "@@ -0,0 +1,2 @@\n+x\n+y" }] });
   const failed = n.normalize(msg({ type: "user", parent_tool_use_id: null, message: { role: "user", content: [{ type: "tool_result", tool_use_id: "p1", content: "boom", is_error: true }] } }), "t");
   assert.equal((failed[0] as any).isError, true);
+});
+
+test("file changes carry unified hunks: edits from the patch, notebooks without one, subagents' tagged", () => {
+  const n = new ClaudeNormalizer(S);
+  n.normalize(msg({ type: "assistant", parent_tool_use_id: null, message: { id: "m", content: [
+    { type: "tool_use", id: "e1", name: "Edit", input: { file_path: "/tmp/a.ts", old_string: "a", new_string: "b" } },
+    { type: "tool_use", id: "nb", name: "NotebookEdit", input: { notebook_path: "/tmp/n.ipynb", new_source: "x" } },
+    { type: "tool_use", id: "task-tool", name: "Agent", input: { prompt: "Fix" } },
+  ] } }), "t");
+  const edit = n.normalize(msg({ type: "user", parent_tool_use_id: null, tool_use_result: {
+    filePath: "/tmp/a.ts", oldString: "a", newString: "b",
+    structuredPatch: [{ oldStart: 3, oldLines: 2, newStart: 3, newLines: 2, lines: [" keep", "-a", "+b"] }],
+  }, message: { role: "user", content: [{ type: "tool_result", tool_use_id: "e1", content: "ok" }] } }), "t");
+  assert.deepEqual((edit[1] as any).changes, [{ path: "/tmp/a.ts", kind: "update", diff: "@@ -3,2 +3,2 @@\n keep\n-a\n+b" }]);
+  const notebook = n.normalize(msg({ type: "user", parent_tool_use_id: null, tool_use_result: { notebook_path: "/tmp/n.ipynb", new_source: "x" }, message: { role: "user", content: [{ type: "tool_result", tool_use_id: "nb", content: "ok" }] } }), "t");
+  assert.deepEqual((notebook[1] as any).changes, [{ path: "/tmp/n.ipynb", kind: "update" }]);
+  n.normalize(msg({ type: "system", subtype: "task_started", task_id: "agent-1", tool_use_id: "task-tool", task_type: "local_agent" }), "t");
+  n.normalize(msg({ type: "assistant", parent_tool_use_id: "task-tool", message: { id: "sm", content: [{ type: "tool_use", id: "sw", name: "Write", input: { file_path: "/tmp/b.md", content: "hi" } }] } }), "t");
+  const inner = n.normalize(msg({ type: "user", parent_tool_use_id: "task-tool", tool_use_result: { type: "create", filePath: "/tmp/b.md", content: "hi" }, message: { role: "user", content: [{ type: "tool_result", tool_use_id: "sw", content: "ok" }] } }), "t");
+  assert.deepEqual(inner[1], { threadId: S, turnId: "t", agentId: "agent-1", type: "file.changed", itemId: "sw", changes: [{ path: "/tmp/b.md", kind: "add", diff: "@@ -0,0 +1,1 @@\n+hi" }] });
 });
 
 test("subagents: task events and their messages tagged with the task ID", () => {
