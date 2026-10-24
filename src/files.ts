@@ -6,7 +6,7 @@
 
 import { execFile } from "node:child_process";
 import { randomUUID } from "node:crypto";
-import { mkdir, readFile, readdir, writeFile } from "node:fs/promises";
+import { mkdtemp, readFile, readdir, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { basename, extname, isAbsolute, join, relative, sep } from "node:path";
 import { AgentEngineError } from "./errors.ts";
@@ -123,13 +123,27 @@ export function attachedFilesNote(paths: string[]): string {
   return paths.length ? `\n\nAttached files:\n${paths.map((path) => `- ${path}`).join("\n")}` : "";
 }
 
-/** Folder for files a turn attached as base64, for runtimes that read attachments from disk. */
-const ATTACHMENT_DIR = join(tmpdir(), "agent-engines", "attachments");
+/** Private temporary folders by purpose, one per process. */
+const privateDirs = new Map<string, Promise<string>>();
+
+/**
+ * A temporary folder only this user can open, made once per process. A fixed
+ * name under a shared `/tmp` could be made first, and then read or swapped, by
+ * another user.
+ */
+export function privateTempDir(purpose: string): Promise<string> {
+  let dir = privateDirs.get(purpose);
+  if (!dir) {
+    dir = mkdtemp(join(tmpdir(), `agent-engines-${purpose}-`));
+    privateDirs.set(purpose, dir);
+    dir.catch(() => privateDirs.delete(purpose));
+  }
+  return dir;
+}
 
 /** Writes an attachment to a temporary file and returns its path. */
 export async function saveAttachment(name: string, data: Buffer): Promise<string> {
-  await mkdir(ATTACHMENT_DIR, { recursive: true });
-  const path = join(ATTACHMENT_DIR, `${randomUUID()}-${name.replace(/[^A-Za-z0-9._-]/gu, "_")}`);
+  const path = join(await privateTempDir("attachments"), `${randomUUID()}-${name.replace(/[^A-Za-z0-9._-]/gu, "_")}`);
   await writeFile(path, data);
   return path;
 }

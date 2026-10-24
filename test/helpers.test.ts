@@ -2,7 +2,7 @@
 
 import assert from "node:assert/strict";
 import { execFile } from "node:child_process";
-import { mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
+import { mkdir, mkdtemp, readFile, rm, stat, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { basename, dirname, join } from "node:path";
 import { after, test } from "node:test";
@@ -208,7 +208,10 @@ test("attachedFilesNote lists paths, or is empty when there are none", () => {
 test("saveAttachment writes the bytes under a sanitised name", async () => {
   const path = await saveAttachment("../../my file (1).txt", Buffer.from("bytes"));
   try {
-    assert.equal(dirname(path), join(tmpdir(), "agent-engines", "attachments"));
+    assert.ok(basename(dirname(path)).startsWith("agent-engines-attachments-"), path);
+    assert.equal(dirname(dirname(path)), tmpdir());
+    // Only this user can open the folder.
+    assert.equal((await stat(dirname(path))).mode & 0o077, 0);
     assert.ok(basename(path).endsWith("-.._.._my_file__1_.txt"), basename(path));
     assert.deepEqual(await readFile(path), Buffer.from("bytes"));
   } finally {

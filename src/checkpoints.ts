@@ -23,10 +23,10 @@ import type { FileChange } from "./types.ts";
 /** Untracked files larger than this are left out of a snapshot, as Codex did. */
 const MAX_SNAPSHOT_FILE_BYTES = 10 * 1024 * 1024;
 
-/** Runs git in `cwd`; rejects with its stderr. */
+/** Runs git in `cwd`; rejects with its stderr. Paths are literal, so a file named `[id].tsx` is not a glob. */
 function git(cwd: string, args: string[], env: NodeJS.ProcessEnv = process.env): Promise<string> {
   return new Promise((resolve, reject) => {
-    execFile("git", args, { cwd, env, maxBuffer: 256 * 1024 * 1024 }, (error, stdout, stderr) => {
+    execFile("git", args, { cwd, env: { ...env, GIT_LITERAL_PATHSPECS: "1" }, maxBuffer: 256 * 1024 * 1024 }, (error, stdout, stderr) => {
       if (error) reject(new AgentEngineError(`git ${args[0]} failed: ${String(stderr || error.message).trim()}`, { cause: error }));
       else resolve(stdout);
     });
@@ -139,20 +139,30 @@ interface Hunk {
   lines: Array<{ op: " " | "-" | "+"; text: string }>;
 }
 
-/** Parses `@@ -a,b +c,d @@` hunks; the no-newline marker is skipped. */
+/**
+ * Parses `@@ -a,b +c,d @@` hunks, reading only as many lines as each header
+ * counts, so a diff's trailing newline is not taken for an empty context line.
+ * The no-newline marker is skipped.
+ */
 function parseHunks(diff: string): Hunk[] {
   const hunks: Hunk[] = [];
+  let oldLeft = 0;
+  let newLeft = 0;
   for (const line of diff.split("\n")) {
-    const header = /^@@ -\d+(?:,\d+)? \+(\d+)(?:,\d+)? @@/u.exec(line);
+    const header = /^@@ -\d+(?:,(\d+))? \+(\d+)(?:,(\d+))? @@/u.exec(line);
     if (header) {
-      hunks.push({ newStart: Number(header[1]), lines: [] });
+      hunks.push({ newStart: Number(header[2]), lines: [] });
+      oldLeft = header[1] === undefined ? 1 : Number(header[1]);
+      newLeft = header[3] === undefined ? 1 : Number(header[3]);
       continue;
     }
     const hunk = hunks[hunks.length - 1];
-    if (!hunk || line.startsWith("\\")) continue;
-    const op = line[0];
+    if (!hunk || line.startsWith("\\") || (oldLeft <= 0 && newLeft <= 0)) continue;
+    // Some tools write an empty context line without its leading space.
+    const op = line === "" ? " " : line[0];
+    if (op === " " || op === "-") oldLeft -= 1;
+    if (op === " " || op === "+") newLeft -= 1;
     if (op === " " || op === "-" || op === "+") hunk.lines.push({ op, text: line.slice(1) });
-    else if (line === "") hunk.lines.push({ op: " ", text: "" });
   }
   return hunks;
 }

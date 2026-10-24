@@ -616,10 +616,13 @@ class AcpThread implements Thread {
   run(input: TurnInput, turnOptions: TurnOptions = {}): Turn {
     if (this.activeTurn) throw new AgentEngineError("A turn is already running on this thread; wait for it to end.");
     if (turnOptions.outputSchema) throw new UnsupportedFeatureError("return structured output", this.engine.name);
-    const turn = this.newTurn(typeof input === "string" ? input : input.text);
+    const text = typeof input === "string" ? input : input.text;
+    const turn = this.newTurn(text);
     void (async () => {
       try {
         const client = await this.ready();
+        // Reloading the session after the agent restarted replaced the normalizer; this turn starts on the new one.
+        if (this.normalizer.turnId !== turn.turnId) this.normalizer.startTurn(turn.turnId!, text);
         if (turnOptions.model) await this.setOption("model", turnOptions.model);
         if (turnOptions.effort) await this.setOption("thought_level", turnOptions.effort);
         if (turnOptions.mode) await this.setMode(turnOptions.mode);

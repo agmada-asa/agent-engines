@@ -600,6 +600,39 @@ test("the agent process exiting mid-turn fails the turn with kind connection", a
   await engine.close();
 });
 
+test("after the agent restarts, a session reloaded with session/load still streams the next turn", async () => {
+  const { spawn, children } = fakeAcpSpawner({
+    // No session/resume, so the engine reloads the session, which replays it.
+    initialize: () => ({ protocolVersion: 1, agentCapabilities: { loadSession: true }, agentInfo: { name: "load-only", version: "0.1.0" } }),
+    "session/load": (params, server) => {
+      server.update(params.sessionId, { sessionUpdate: "user_message_chunk", content: { type: "text", text: "First" } });
+      server.update(params.sessionId, { sessionUpdate: "agent_message_chunk", content: { type: "text", text: "First answer" } });
+      return {};
+    },
+    "session/prompt": (params, server) => {
+      server.update(params.sessionId, { sessionUpdate: "agent_message_chunk", content: { type: "text", text: "Second answer" } });
+      return { stopReason: "end_turn" };
+    },
+  });
+  const engine = new AcpEngine({ command: "fake-agent", cwd: CWD, spawnProcess: spawn });
+  const thread = await engine.startThread({ cwd: CWD });
+  await thread.run("First").result;
+  children[0]!.exit();
+  await until(() => children[0]!.exited);
+  await new Promise((resolve) => setImmediate(resolve));
+  const turn = thread.run("Second");
+  const events = await drain(turn);
+  assert.equal(children.length, 2);
+  assert.deepEqual(ofType(events, "text.delta").map((event) => event.delta), ["Second answer"]);
+  assert.equal((await turn.result).text, "Second answer");
+  const history = await thread.history();
+  assert.deepEqual(history[history.length - 1]!.entries, [
+    { kind: "message", role: "user", text: "Second" },
+    { kind: "message", role: "assistant", text: "Second answer" },
+  ]);
+  await engine.close();
+});
+
 test("a late tool update after the call finished emits nothing", () => {
   const normalizer = new AcpNormalizer("sess-1");
   normalizer.startTurn("turn-1", "");

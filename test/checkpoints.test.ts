@@ -102,6 +102,13 @@ test("reverseDiff undoes what unifiedDiff describes", () => {
   for (const [before, after] of cases) assert.equal(reverseDiff(after, unifiedDiff(before, after)), before, JSON.stringify([before, after]));
 });
 
+test("reverseDiff takes Codex's diffs, which end in a newline, including a hunk at the end of the file", () => {
+  assert.equal(reverseDiff("a\nb\nC\n", "@@ -2,2 +2,2 @@\n b\n-c\n+C\n"), "a\nb\nc\n");
+  assert.equal(reverseDiff("x\nC\ny\n", "@@ -1,2 +1,2 @@\n x\n-c\n+C\n"), "x\nc\ny\n");
+  // An empty context line written without its leading space still counts.
+  assert.equal(reverseDiff("a\n\nB\n", "@@ -1,3 +1,3 @@\n a\n\n-b\n+B\n"), "a\n\nb\n");
+});
+
 test("reverseDiff finds a hunk that moved, and refuses one that no longer matches", () => {
   const diff = unifiedDiff("a\nb\nc\n", "a\nB\nc\n");
   assert.equal(reverseDiff("header\nextra\na\nB\nc\n", diff), "header\nextra\na\nb\nc\n");

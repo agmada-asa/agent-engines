@@ -8,8 +8,8 @@
  */
 
 import { createHash } from "node:crypto";
-import { mkdir, writeFile } from "node:fs/promises";
-import { homedir, tmpdir } from "node:os";
+import { writeFile } from "node:fs/promises";
+import { homedir } from "node:os";
 import { isAbsolute, join } from "node:path";
 import {
   AgentEngineError,
@@ -21,7 +21,7 @@ import {
   UnsupportedFeatureError,
 } from "../errors.ts";
 import { CheckpointStore, restoreTree, reverseChanges, snapshotTree } from "../checkpoints.ts";
-import { attachedFilesNote, saveAttachment } from "../files.ts";
+import { attachedFilesNote, privateTempDir, saveAttachment } from "../files.ts";
 import { responsesItems } from "../handoff.ts";
 import { TurnHandle, emitTo, inputParts, parseOutput } from "../turn.ts";
 import type {
@@ -369,16 +369,13 @@ function reviewTarget(target: ReviewTarget): unknown {
   }
 }
 
-/** Folder for the role files custom subagents point at. */
-const AGENT_DIR = join(tmpdir(), "agent-engines", "codex-agents");
-
 /**
  * Custom subagents as Codex agent roles: each role is a config file with its
  * model and instructions, named in `agents.<name>` with its description.
  */
 async function agentRoles(agents: NonNullable<ThreadOptions["agents"]>): Promise<Record<string, unknown>> {
   const roles: Record<string, unknown> = {};
-  await mkdir(AGENT_DIR, { recursive: true });
+  const dir = await privateTempDir("codex-agents");
   for (const [name, agent] of Object.entries(agents)) {
     if (!/^[A-Za-z0-9_-]{1,64}$/u.test(name)) throw new AgentEngineError(`Agent name ${JSON.stringify(name)} cannot be used safely.`);
     // JSON string escapes are valid TOML basic strings.
@@ -387,7 +384,7 @@ async function agentRoles(agents: NonNullable<ThreadOptions["agents"]>): Promise
       `developer_instructions = ${JSON.stringify(agent.prompt)}`,
       "",
     ].join("\n");
-    const path = join(AGENT_DIR, `${createHash("sha256").update(toml).digest("hex").slice(0, 16)}.toml`);
+    const path = join(dir, `${createHash("sha256").update(toml).digest("hex").slice(0, 16)}.toml`);
     await writeFile(path, toml);
     roles[name] = { description: agent.description, config_file: path };
   }
