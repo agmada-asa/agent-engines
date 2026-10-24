@@ -348,9 +348,16 @@ export interface ToolCall {
 
 /** One file a turn changed. */
 export interface FileChange {
+  /** Absolute path. For a move, where the file was before. */
   path: string;
   kind: "add" | "delete" | "update";
-  /** Unified diff, when the runtime gives one. */
+  /** For a move: where the file is now. */
+  movedTo?: string;
+  /**
+   * Unified diff hunks (`@@ -a,b +c,d @@` then `+`, `-` and ` ` lines), with no
+   * `---`/`+++` header. A new file is all `+`, a deleted one all `-`. Left out
+   * when the runtime does not say what changed (Claude's NotebookEdit).
+   */
   diff?: string;
 }
 

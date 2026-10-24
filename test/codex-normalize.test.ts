@@ -61,14 +61,23 @@ test("file changes", () => {
   const n = normalizer();
   const events = n.normalize("item/completed", {
     threadId: T, turnId: "turn-1",
-    item: { type: "fileChange", id: "f1", status: "completed", changes: [{ path: "/tmp/a.txt", kind: { type: "add" }, diff: "+hi" }, { path: "/tmp/b.txt", kind: "update", diff: "" }] },
+    // Codex sends a new file's whole text, and an update as hunks.
+    item: { type: "fileChange", id: "f1", status: "completed", changes: [
+      { path: "/tmp/a.txt", kind: { type: "add" }, diff: "hi\nthere\n" },
+      { path: "/tmp/b.txt", kind: "update", diff: "" },
+      { path: "/tmp/c.txt", kind: { type: "update", move_path: "/tmp/d.txt" }, diff: "@@ -1 +1 @@\n-a\n+b" },
+    ] },
   });
   assert.deepEqual(events, [{
     threadId: T, turnId: "turn-1", type: "file.changed", itemId: "f1",
-    changes: [{ path: "/tmp/a.txt", kind: "add", diff: "+hi" }, { path: "/tmp/b.txt", kind: "update" }],
+    changes: [
+      { path: "/tmp/a.txt", kind: "add", diff: "@@ -0,0 +1,2 @@\n+hi\n+there" },
+      { path: "/tmp/b.txt", kind: "update" },
+      { path: "/tmp/c.txt", kind: "update", movedTo: "/tmp/d.txt", diff: "@@ -1 +1 @@\n-a\n+b" },
+    ],
   }]);
-  const deleted = n.normalize("item/completed", { threadId: T, turnId: "turn-1", item: { type: "fileChange", id: "f2", status: "completed", changes: [{ path: "/x", kind: { type: "delete" }, diff: "" }] } });
-  assert.equal((deleted[0] as any).changes[0].kind, "delete");
+  const deleted = n.normalize("item/completed", { threadId: T, turnId: "turn-1", item: { type: "fileChange", id: "f2", status: "completed", changes: [{ path: "/x", kind: { type: "delete" }, diff: "gone" }] } });
+  assert.deepEqual((deleted[0] as any).changes, [{ path: "/x", kind: "delete", diff: "@@ -1,1 +0,0 @@\n-gone" }]);
 });
 
 test("collab subagents: spawn, their own events tagged, and their end", () => {

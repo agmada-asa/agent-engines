@@ -217,11 +217,11 @@ test("approval and question requests surface as events and answer the server", a
   });
   const approval = await children[0].ask("item/commandExecution/requestApproval", { threadId: THREAD, turnId: "turn-1", itemId: "c", command: "npm test" });
   assert.deepEqual(approval, { decision: "accept" });
-  children[0].notify("item/started", { threadId: THREAD, turnId: "turn-1", item: { type: "fileChange", id: "f", status: "inProgress", changes: [{ path: "/tmp/x", kind: { type: "add" }, diff: "+x" }] } });
+  children[0].notify("item/started", { threadId: THREAD, turnId: "turn-1", item: { type: "fileChange", id: "f", status: "inProgress", changes: [{ path: "/tmp/x", kind: { type: "add" }, diff: "x" }] } });
   const files = await children[0].ask("item/fileChange/requestApproval", { threadId: THREAD, turnId: "turn-1", itemId: "f" });
   assert.deepEqual(files, { decision: "accept" });
   const fileRequest = seen.find((event) => event.type === "request" && event.request.kind === "approval" && event.request.action === "file-change");
-  assert.deepEqual((fileRequest as any).request.changes, [{ path: "/tmp/x", kind: "add", diff: "+x" }]);
+  assert.deepEqual((fileRequest as any).request.changes, [{ path: "/tmp/x", kind: "add", diff: "@@ -0,0 +1,1 @@\n+x" }]);
   const answer = await children[0].ask("item/tool/requestUserInput", { threadId: THREAD, turnId: "turn-1", itemId: "q", isBlocking: true, questions: [{ id: "q", header: "", question: "Go?", isOther: false, isSecret: false, options: null }] });
   assert.deepEqual(answer, { answers: { q: { answers: ["Yes"] } } });
   assert.equal(seen.filter((event) => event.type === "request").length, 3);

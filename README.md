@@ -125,6 +125,8 @@ Limits worth knowing:
 
 Codex marks each agent message's `phase` on `text.delta` and `text.done`: `commentary` for a progress note between tool calls, `answer` for the reply. Claude's text events have no phase. A turn's result text is never a progress note.
 
+`file.changed` lists the files one tool call changed, from the main agent or a subagent (tagged with its `agentId`): Codex's `apply_patch` edits, and Claude's Edit, MultiEdit, Write and NotebookEdit. Each `diff` is unified hunks with no `---`/`+++` header, the same from both runtimes: a new file is all `+` lines, a deleted one all `-`, and a Codex move names the new path in `movedTo`. Files a shell command writes are not reported by either runtime.
+
 A `request` is an approval, a question (Claude's AskUserQuestion, Codex's user-input request) or an MCP elicitation. Call its `respond` once; an unanswered request is cancelled when the turn ends. A Codex file-change approval carries the proposed `changes`, with diffs, so the user can review them before allowing.
 
 A failed turn has an `error.kind`: `usage-limit` and `rate-limit` come with `resetsAt` when the runtime says, so an app can try again then.
