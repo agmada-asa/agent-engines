@@ -531,7 +531,10 @@ export interface ClaudeThreadOptions {
   hooks?: Record<string, unknown[]>;
   /** Local plugins to load, in the SDK's shape (`{ type: "local", path }`). */
   plugins?: Array<{ type: "local"; path: string }>;
-  /** Any other SDK `query` option, merged last. */
+  /**
+   * Any other SDK `query` option, merged last. `includeHookEvents: false` turns
+   * `hook.*` events off, SessionStart's included (Claude sends those regardless).
+   */
   extra?: Record<string, unknown>;
 }
 

@@ -1158,6 +1158,8 @@ class ClaudeThread implements Thread {
   }
 
   private dispatch(event: AgentEvent): void {
+    // Claude sends SessionStart's hook messages even with hook events off, so the opt-out is kept here.
+    if ((event.type === "hook.started" || event.type === "hook.completed") && this.options.claude?.extra?.includeHookEvents === false) return;
     const turn = this.current;
     if (turn && !turn.done && event.turnId === turn.turnId) turn.push(event);
     emitTo(this.listeners, event);
