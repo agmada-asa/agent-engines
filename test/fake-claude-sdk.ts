@@ -75,6 +75,65 @@ export class FakeQuery {
     this.calls.push({ method: "applyFlagSettings", args: [settings] });
   }
 
+  async setPermissionMode(mode: string) {
+    this.calls.push({ method: "setPermissionMode", args: [mode] });
+  }
+
+  async getContextUsage() {
+    this.calls.push({ method: "getContextUsage", args: [] });
+    return {
+      categories: [{ id: "messages", name: "Messages", tokens: 1200, color: "x", kind: "used" }, { id: "free_space", name: "Free space", tokens: 198_800, color: "y", kind: "free" }],
+      totalTokens: 1200, maxTokens: 200_000, rawMaxTokens: 200_000, percentage: 0.6, gridRows: [], model: "claude-haiku-5-5", memoryFiles: [],
+    };
+  }
+
+  async rewindFiles(userMessageId: string, options?: unknown) {
+    this.calls.push({ method: "rewindFiles", args: [userMessageId, options] });
+    return this.script.rewind ?? { canRewind: true, filesChanged: ["/tmp/a.ts"], insertions: 2, deletions: 1 };
+  }
+
+  async stopTask(taskId: string) {
+    this.calls.push({ method: "stopTask", args: [taskId] });
+  }
+
+  async setMcpServers(servers: unknown) {
+    this.calls.push({ method: "setMcpServers", args: [servers] });
+    return { added: Object.keys(servers as object), removed: [], errors: {} };
+  }
+
+  async reconnectMcpServer(name: string) {
+    this.calls.push({ method: "reconnectMcpServer", args: [name] });
+  }
+
+  async toggleMcpServer(name: string, enabled: boolean) {
+    this.calls.push({ method: "toggleMcpServer", args: [name, enabled] });
+  }
+
+  async readMcpResource(server: string, uri: string) {
+    this.calls.push({ method: "readMcpResource", args: [server, uri] });
+    return { contents: [{ uri, mimeType: "text/plain", text: "resource text" }] };
+  }
+
+  async mcpServerStatus() {
+    this.calls.push({ method: "mcpServerStatus", args: [] });
+    return [];
+  }
+
+  async reloadSkills() {
+    this.calls.push({ method: "reloadSkills", args: [] });
+    return { skills: [] };
+  }
+
+  async supportedCommands() {
+    this.calls.push({ method: "supportedCommands", args: [] });
+    return [{ name: "deploy", description: "Ship it", argumentHint: "" }];
+  }
+
+  async reloadPlugins() {
+    this.calls.push({ method: "reloadPlugins", args: [] });
+    return { commands: [], agents: [], plugins: [{ name: "linear", path: "/p/linear", source: "official", version: "1.0" }], mcpServers: [], error_count: 0 };
+  }
+
   close(): void {
     this.closed = true;
     this.end();
@@ -118,12 +177,22 @@ export interface FakeClaudeScript {
   /** Runs for each user message the engine sends. */
   onUser?: (message: Message, query: FakeQuery) => void | Promise<void>;
   onInterrupt?: (query: FakeQuery) => void;
+  /** What `getSessionMessages` returns; defaults to a short session with a subagent message. */
+  sessionMessages?: Message[];
+  /** What `rewindFiles` returns. */
+  rewind?: Message;
 }
 
 /** A fake SDK and every query it started. */
-export function fakeClaudeSdk(script: FakeClaudeScript = {}): { sdk: ClaudeSdk; queries: FakeQuery[]; deleted: Array<{ id: string; dir?: string }> } {
+export function fakeClaudeSdk(script: FakeClaudeScript = {}): {
+  sdk: ClaudeSdk;
+  queries: FakeQuery[];
+  deleted: Array<{ id: string; dir?: string }>;
+  calls: Array<{ method: string; args: unknown[] }>;
+} {
   const queries: FakeQuery[] = [];
   const deleted: Array<{ id: string; dir?: string }> = [];
+  const calls: Array<{ method: string; args: unknown[] }> = [];
   const sdk = {
     query: ({ prompt, options }: { prompt: AsyncIterable<Message>; options: Record<string, any> }) => {
       const query = new FakeQuery(prompt, options, script);
@@ -135,11 +204,29 @@ export function fakeClaudeSdk(script: FakeClaudeScript = {}): { sdk: ClaudeSdk; 
     },
     // Every session exists except "never-prompted".
     getSessionInfo: async (id: string) => (id === "never-prompted" ? undefined : { sessionId: id, summary: "", lastModified: 0 }),
-    getSessionMessages: async () => [
+    forkSession: async (id: string, options: unknown) => {
+      calls.push({ method: "forkSession", args: [id, options] });
+      return { sessionId: `fork-of-${id}` };
+    },
+    listSessions: async (options: unknown) => {
+      calls.push({ method: "listSessions", args: [options] });
+      return [
+        { sessionId: "s-old", summary: "Old work", lastModified: 1_790_000_000_000, firstPrompt: "Fix the build", cwd: "/tmp" },
+        { sessionId: "s-new", summary: "Auto summary", customTitle: "Tests", lastModified: 1_790_000_900_000, firstPrompt: "Add tests", gitBranch: "main", cwd: "/tmp", createdAt: 1_789_000_000_000 },
+      ];
+    },
+    renameSession: async (id: string, title: string, options: unknown) => {
+      calls.push({ method: "renameSession", args: [id, title, options] });
+    },
+    resolveSettings: async (options: unknown) => {
+      calls.push({ method: "resolveSettings", args: [options] });
+      return { effective: { model: "opus" }, provenance: {}, sources: [{ source: "userSettings", settings: { model: "opus" }, path: "/home/.claude/settings.json" }] };
+    },
+    getSessionMessages: async (...args: unknown[]) => script.sessionMessages ?? (calls.push({ method: "getSessionMessages", args }), [
       { type: "user", uuid: "1", session_id: "s", parent_tool_use_id: null, parent_agent_id: null, message: { role: "user", content: "Hi" } },
       { type: "assistant", uuid: "2", session_id: "s", parent_tool_use_id: "task-1", parent_agent_id: null, message: { role: "assistant", content: [{ type: "text", text: "From a subagent" }] } },
       { type: "assistant", uuid: "3", session_id: "s", parent_tool_use_id: null, parent_agent_id: null, message: { role: "assistant", content: [{ type: "text", text: "Hello" }] } },
-    ],
+    ]),
     getSubagentMessages: async () => [
       { type: "user", uuid: "1", session_id: "s", parent_tool_use_id: null, parent_agent_id: null, message: { role: "user", content: "Find the file" } },
       { type: "assistant", uuid: "2", session_id: "s", parent_tool_use_id: null, parent_agent_id: null, message: { role: "assistant", content: [{ type: "tool_use", id: "tu", name: "Glob", input: { pattern: "*.md" } }] } },
@@ -147,7 +234,7 @@ export function fakeClaudeSdk(script: FakeClaudeScript = {}): { sdk: ClaudeSdk; 
       { type: "assistant", uuid: "4", session_id: "s", parent_tool_use_id: null, parent_agent_id: null, message: { role: "assistant", content: [{ type: "text", text: "README.md" }] } },
     ],
   } as unknown as ClaudeSdk;
-  return { sdk, queries, deleted };
+  return { sdk, queries, deleted, calls };
 }
 
 /** The SDK messages for a simple successful turn replying `text`. */

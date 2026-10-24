@@ -7,14 +7,22 @@
  * only translate them into each runtime's native settings.
  */
 
-/** The runtimes this library drives. */
-export type ProviderId = "codex" | "claude";
+/** The runtimes this library drives: Codex, Claude, and any agent that speaks ACP. */
+export type ProviderId = "codex" | "claude" | "acp";
 
-/** One runtime: its catalogue, sign-in and threads. Create with `createEngine`. */
+/**
+ * One runtime: its catalogue, sign-in and threads. Create with `createEngine`.
+ *
+ * Every method exists on every engine. One the runtime cannot do throws
+ * `UnsupportedFeatureError`; `capabilities()` says which those are, so a UI can
+ * hide the control rather than wait for the error.
+ */
 export interface Engine {
   readonly provider: ProviderId;
   /** Whether the runtime is installed, recent enough and signed in on a subscription. Never throws. */
   availability(): Promise<Availability>;
+  /** What this runtime can do, for showing only the controls that work. */
+  capabilities(): Promise<Capabilities>;
   /** The models and efforts the signed-in runtime offers right now. */
   models(): Promise<ModelInfo[]>;
   /**
@@ -37,9 +45,233 @@ export interface Engine {
    * for subagents this engine saw, theirs too. Safe on a thread already gone.
    */
   deleteThread(threadId: string, options: { cwd: string }): Promise<void>;
+  /**
+   * Starts a new thread from a copy of a saved one, through `throughTurnId`
+   * (inclusive) or the whole of it. The original is left as it was.
+   */
+  forkThread(threadId: string, options: ForkOptions): Promise<Thread>;
+  /** Saved threads, newest first: ones this library started and ones the runtime's own apps did. */
+  listThreads(options?: ListThreadsOptions): Promise<ThreadSummary[]>;
+  /** A saved thread's summary and turns, read back from the runtime. No model is called. */
+  readThread(threadId: string, options: { cwd: string }): Promise<ThreadHistory>;
+  /** Sets the title the runtime shows for a thread. */
+  renameThread(threadId: string, title: string, options: { cwd: string }): Promise<void>;
+  /** Moves a thread out of the runtime's list without deleting it. */
+  archiveThread(threadId: string, options: { cwd: string }): Promise<void>;
+  unarchiveThread(threadId: string, options: { cwd: string }): Promise<void>;
+  /** Starts a sign-in the user finishes in a browser: a URL to open, or a URL and a code to type. */
+  login(options?: { method?: "browser" | "device-code" }): Promise<LoginFlow>;
+  logout(): Promise<void>;
+  /**
+   * Gets the runtime ready before the first message, so the first reply comes
+   * sooner. With thread options, Claude also opens that thread's process now and
+   * hands it to the next `startThread` with the same options.
+   */
+  prewarm(options?: ThreadOptions): Promise<void>;
+  /** Files under `cwd` matching `query` fuzzily, best first: for `@` mentions in a composer. */
+  searchFiles(query: string, options: { cwd: string; limit?: number }): Promise<FileMatch[]>;
+  /** The runtime's effective settings for a folder, as it reads them. For a settings screen. */
+  config(options?: { cwd?: string }): Promise<EffectiveConfig>;
+  /** Installed and available plugins. */
+  plugins(options?: { cwd?: string }): Promise<PluginInfo[]>;
+  installPlugin(plugin: { name: string; marketplace?: string }): Promise<void>;
+  uninstallPlugin(pluginId: string): Promise<void>;
+  /** Turns one of the user's skills on or off for every thread. */
+  setSkillEnabled(name: string, enabled: boolean): Promise<void>;
+  /** Engine-wide events: sign-in changes and notices that belong to no thread. Returns an unsubscribe function. */
+  subscribe(listener: (event: EngineEvent) => void): () => void;
   /** Stops every thread and the runtime process. Safe to call more than once. */
   close(): Promise<void>;
 }
+
+/**
+ * What a runtime can do. A `false` means the matching method throws
+ * `UnsupportedFeatureError`; a string says how the engine does it where the
+ * runtimes differ.
+ */
+export interface Capabilities {
+  provider: ProviderId;
+  /** `Turn.steer` adds to a running turn. */
+  steer: boolean;
+  /** `Thread.compact`. */
+  compact: boolean;
+  /** `Engine.forkThread`. */
+  fork: boolean;
+  /** `Thread.rewind` drops later turns from the conversation. */
+  rewind: boolean;
+  /**
+   * `Thread.rewind` with `files: true` also restores the files those turns
+   * changed. Claude needs `fileCheckpoints: true` on the thread; Codex leaves
+   * files to the app (a git checkpoint, say).
+   */
+  rewindFiles: boolean;
+  /** `listThreads`, `readThread` and `Thread.history`. */
+  history: boolean;
+  /** `renameThread`, `Thread.rename` and `ThreadOptions.title`. */
+  rename: boolean;
+  /** `archiveThread` and `unarchiveThread`. */
+  archive: boolean;
+  /** Access levels the runtime has a native setting for. */
+  access: Access[];
+  /** `mode` values the runtime can switch between. */
+  modes: ThreadMode[];
+  /** `outputSchema` on a turn or thread, with the parsed reply in `TurnResult.output`. */
+  structuredOutput: boolean;
+  /** `Thread.contextUsage`. */
+  contextUsage: boolean;
+  /** Images in `TurnInput`. */
+  images: boolean;
+  /**
+   * Files in `TurnInput`: `content` sends PDFs and text files as content the
+   * model reads; `paths` names them in the message for the agent to open.
+   */
+  files: "content" | "paths";
+  /** `Thread.setGoal`, `goal` and `clearGoal`: work that runs over several turns. */
+  goals: boolean;
+  /** `Thread.review`: the runtime's own code review, or a review prompt the engine writes. */
+  review: "native" | "prompt" | false;
+  /** `Thread.shell`. */
+  shell: boolean;
+  /** `Thread.tasks`. */
+  listTasks: boolean;
+  /** `Thread.stopTask`. */
+  stopTask: boolean;
+  /** Live MCP management on a thread. */
+  mcp: { setServers: boolean; reconnect: boolean; toggle: boolean; login: boolean; readResource: boolean };
+  /** `Engine.login`. */
+  login: boolean;
+  /** `Engine.logout`. */
+  logout: boolean;
+  /** `hook.started` and `hook.completed` events. */
+  hookEvents: boolean;
+  /** Host hook callbacks (`claude.hooks`). */
+  hookCallbacks: boolean;
+  /** Which of `ThreadOptions.limits` the runtime enforces. */
+  limits: Array<keyof TurnLimits>;
+  /** How `ThreadOptions.seed` reaches the model: as history (`native`) or as context in the first message (`prompt`). */
+  handoff: "native" | "prompt";
+  /** `Engine.prewarm` does more than start the runtime: it opens the next thread's process ahead of time. */
+  prewarmThreads: boolean;
+  /** `Engine.searchFiles`: the runtime's own index, or a local search of the folder. */
+  fileSearch: "native" | "local";
+  /** `ThreadOptions.agents`. */
+  agents: boolean;
+  /** `Thread.reloadSkills` and `Engine.setSkillEnabled`. */
+  skills: { reload: boolean; toggle: boolean };
+  /** `Engine.plugins`, `installPlugin` and `uninstallPlugin`, and `Thread.reloadPlugins`. */
+  plugins: { list: boolean; install: boolean; reload: boolean };
+  /** `Engine.config`. */
+  config: boolean;
+  /** `Thread.realtime`: a live voice or text session. */
+  realtime: boolean;
+  /** `prompt.suggestion` events when `ThreadOptions.promptSuggestions` is on. */
+  promptSuggestions: boolean;
+  /** Which live progress events the runtime sends. */
+  liveOutput: { commandOutput: boolean; diff: boolean; planProposal: boolean };
+}
+
+/** Settings for `Engine.forkThread`: the new thread's options, and where to cut. */
+export interface ForkOptions extends ThreadOptions {
+  /** Last turn to keep, inclusive. Omitted keeps every turn. */
+  throughTurnId?: string;
+}
+
+/** Filters for `Engine.listThreads`. */
+export interface ListThreadsOptions {
+  /** Only threads started in this folder. */
+  cwd?: string;
+  /** Most threads to return. Defaults to 50. */
+  limit?: number;
+  /** Archived threads instead of the active ones (Codex). */
+  archived?: boolean;
+  /** Only threads whose title or first message contains this text. */
+  search?: string;
+}
+
+/** One saved thread, as the runtime lists it. */
+export interface ThreadSummary {
+  id: string;
+  provider: ProviderId;
+  cwd?: string;
+  title?: string;
+  /** Usually the first user message. */
+  preview?: string;
+  createdAt?: Date;
+  updatedAt?: Date;
+  /** The thread this one was forked from. */
+  forkedFrom?: string;
+  model?: string;
+  gitBranch?: string;
+  archived?: boolean;
+}
+
+/** A thread read back with its turns. */
+export interface ThreadHistory extends ThreadSummary {
+  turns: HistoryTurn[];
+}
+
+/** One turn of a saved thread. Its `id` is the one `fork`, `rewind` and `interruptTurn` take. */
+export interface HistoryTurn {
+  id: string;
+  status: LastTurn["status"];
+  /** What the user sent and what came back, in order. */
+  entries: TranscriptEntry[];
+  startedAt?: Date;
+}
+
+/** Result of `Thread.rewind`. */
+export interface RewindResult {
+  /** Turns dropped from the conversation. */
+  droppedTurns: number;
+  /** For `files: true`: the files restored, and how much changed. */
+  files?: { paths: string[]; insertions?: number; deletions?: number };
+}
+
+/** A sign-in started by `Engine.login`. */
+export interface LoginFlow {
+  /** Open this in a browser. */
+  url: string;
+  /** For a device-code sign-in: the code to type at `url`. */
+  code?: string;
+  /** Settles when the sign-in finishes, however it ends. Never rejects. */
+  done: Promise<{ success: boolean; error?: string }>;
+  cancel(): Promise<void>;
+}
+
+/** A file `Engine.searchFiles` found. */
+export interface FileMatch {
+  /** Relative to the `cwd` searched. */
+  path: string;
+  /** Higher is better; only comparable within one search. */
+  score: number;
+  /** Character positions in `path` that matched, when known. */
+  indices?: number[];
+}
+
+/** `Engine.config`: the settings the runtime would use, as it reports them. */
+export interface EffectiveConfig {
+  provider: ProviderId;
+  /** The merged settings. Shapes are the runtime's own. */
+  values: Record<string, unknown>;
+  /** Where the settings came from, highest priority last, when the runtime says. */
+  sources?: Array<{ name: string; path?: string; values: Record<string, unknown> }>;
+}
+
+/** One plugin. */
+export interface PluginInfo {
+  id: string;
+  name: string;
+  description?: string;
+  installed: boolean;
+  enabled?: boolean;
+  marketplace?: string;
+  version?: string;
+}
+
+/** An event that belongs to the engine rather than one thread. */
+export type EngineEvent =
+  | { type: "account.changed"; provider: ProviderId; signedIn: boolean; plan?: string }
+  | { type: "notice"; provider: ProviderId; kind: NoticeKind; message: string; details?: string; raw?: unknown };
 
 /** Result of `Engine.availability()`; `ready` means a turn can start. */
 export interface Availability {
@@ -141,12 +373,43 @@ export interface McpServerState {
  * How much a thread may do without asking.
  *
  * - `full`: everything runs without approval and outside any sandbox.
+ * - `auto`: the runtime's own reviewer approves routine actions and asks about the rest
+ *   (Codex's auto review, Claude's auto mode).
+ * - `accept-edits`: file edits go ahead; other actions still ask. Codex's workspace
+ *   sandbox already lets edits in the folder through, so there it is the same as `ask`.
  * - `ask`: the runtime's defaults, with anything needing approval surfaced as a `request` event.
  * - `read-only`: no writes; anything that would need approval is refused.
  *
  * Provider options (`codex.approvalPolicy`, `claude.permissionMode`…) override this.
  */
-export type Access = "full" | "ask" | "read-only";
+export type Access = "full" | "auto" | "accept-edits" | "ask" | "read-only";
+
+/**
+ * How the agent works. `plan` researches and proposes a plan without changing
+ * anything (Codex plan mode, Claude plan mode); `default` does the work.
+ */
+export type ThreadMode = "default" | "plan";
+
+/** Limits a runtime enforces on a thread's turns. */
+export interface TurnLimits {
+  /** Model round trips per turn (Claude). */
+  maxTurns?: number;
+  /** Spend per process, in US dollars, as Claude Code prices it (Claude). */
+  maxBudgetUsd?: number;
+  /** Output tokens the model is told it has for the task, so it can pace itself (Claude task budget). */
+  tokenBudget?: number;
+}
+
+/** A custom subagent the main agent can hand work to. */
+export interface AgentDefinition {
+  /** When to use it; the main agent reads this. */
+  description: string;
+  /** Its instructions. */
+  prompt: string;
+  model?: string;
+  /** Tools it may use (Claude). Codex ignores this. */
+  tools?: string[];
+}
 
 /** Settings for a thread, used on start and again on resume. */
 export interface ThreadOptions {
@@ -157,6 +420,8 @@ export interface ThreadOptions {
   /** Codex `fast` service tier, or Claude fast mode. */
   fastMode?: boolean;
   access?: Access;
+  /** `plan` to research and propose before changing anything. Defaults to `default`. */
+  mode?: ThreadMode;
   /** Extra instructions: Codex developer instructions, appended to Claude's system prompt. */
   instructions?: string;
   mcpServers?: Record<string, McpServer>;
@@ -164,6 +429,36 @@ export interface ThreadOptions {
   env?: Record<string, string>;
   /** Fails a turn that the runtime silently moves to another model. Defaults to true. */
   strictModel?: boolean;
+  /** Title for a new thread; a resumed one keeps its own (use `rename`). */
+  title?: string;
+  /** JSON Schema every reply must match; the parsed reply is `TurnResult.output`. A turn's own schema wins. */
+  outputSchema?: Record<string, unknown>;
+  /** Limits the runtime enforces; see `Capabilities.limits` for which. */
+  limits?: TurnLimits;
+  /** Custom subagents, by name. */
+  agents?: Record<string, AgentDefinition>;
+  /** Folders the agent may use besides `cwd`, as absolute paths. */
+  additionalDirectories?: string[];
+  /**
+   * Keep a copy of each file before the agent changes it, so `rewind` can put
+   * files back (Claude file checkpointing). Off by default.
+   */
+  fileCheckpoints?: boolean;
+  /**
+   * Earlier conversation for a new thread to carry on from: another thread's
+   * `export()`, so work can move between runtimes. Codex adds it to the thread's
+   * history; the others put it before the first message. Ignored on resume.
+   */
+  seed?: PortableTranscript;
+  /**
+   * Models to try in order when the chosen one is overloaded (Claude). A switch
+   * to one of these is not treated as a silent model swap under `strictModel`.
+   */
+  fallbackModels?: string[];
+  /** Ask the runtime for suggested next prompts after each turn (`prompt.suggestion` events; Claude). */
+  promptSuggestions?: boolean;
+  /** One-line summaries of what running subagents are doing, on `task.progress` (Claude). Defaults to true. */
+  progressSummaries?: boolean;
   /** Codex-only settings, passed through. */
   codex?: CodexThreadOptions;
   /** Claude-only settings, passed through to the SDK's `query` options. */
@@ -217,23 +512,140 @@ export interface ClaudeThreadOptions {
   executable?: string;
   /** Forward subagents' text and thinking, not only their tool calls. Defaults to true. */
   forwardSubagentText?: boolean;
+  /**
+   * Hook callbacks the host answers, in the SDK's shape (`PreToolUse`,
+   * `PostToolUse`, `Stop`…). Their runs also arrive as `hook.*` events.
+   */
+  hooks?: Record<string, unknown[]>;
+  /** Local plugins to load, in the SDK's shape (`{ type: "local", path }`). */
+  plugins?: Array<{ type: "local"; path: string }>;
   /** Any other SDK `query` option, merged last. */
   extra?: Record<string, unknown>;
 }
 
-/** What a user sends: text, and optionally images. */
-export type TurnInput = string | { text: string; images?: ImageInput[] };
+/** What a user sends: text, and optionally images and files. */
+export type TurnInput = string | { text: string; images?: ImageInput[]; files?: FileInput[] };
 
 /** An image sent with a turn. */
 export type ImageInput =
   | { type: "path"; path: string }
   | { type: "base64"; mediaType: "image/png" | "image/jpeg" | "image/webp" | "image/gif"; data: string };
 
+/**
+ * A file sent with a turn: a PDF, a text file, anything. Where the runtime
+ * reads documents (`Capabilities.files` is `content`), PDFs and text go in as
+ * content; anything else, and every file elsewhere, is named by path in the
+ * message for the agent to open itself.
+ */
+export type FileInput =
+  | { type: "path"; path: string; name?: string; mediaType?: string }
+  | { type: "base64"; name: string; mediaType: string; data: string };
+
 /** Per-turn changes; they also stick for later turns, as both runtimes do. */
 export interface TurnOptions {
   model?: string;
   effort?: string;
   fastMode?: boolean;
+  /** A new access level from this turn on. */
+  access?: Access;
+  /** A new mode from this turn on: `plan` to propose first, `default` to do the work. */
+  mode?: ThreadMode;
+  /**
+   * JSON Schema this turn's reply must match. The parsed reply is
+   * `TurnResult.output`. On Claude a schema is set per process, so changing it
+   * restarts the thread's process before the turn (history is kept).
+   */
+  outputSchema?: Record<string, unknown> | null;
+}
+
+/** What a code review looks at. */
+export type ReviewTarget =
+  | { type: "uncommitted" }
+  | { type: "base-branch"; branch: string }
+  | { type: "commit"; sha: string; title?: string }
+  | { type: "custom"; instructions: string };
+
+/** How full a thread's context window is. */
+export interface ContextUsage {
+  /** Tokens in the context now. */
+  usedTokens: number;
+  /** The window's size, when known. */
+  maxTokens?: number;
+  /** 0–100, when the size is known. */
+  percent?: number;
+  /** Where the tokens go (system prompt, tools, messages…), when the runtime breaks it down (Claude). */
+  categories?: Array<{ name: string; tokens: number; kind: "used" | "free" | "buffer" | "deferred" }>;
+}
+
+/** A goal a thread keeps working towards over several turns (Codex `/goal`). */
+export interface Goal {
+  objective: string;
+  status: "active" | "paused" | "blocked" | "usage-limited" | "budget-limited" | "complete";
+  tokenBudget?: number;
+  tokensUsed?: number;
+  timeUsedSeconds?: number;
+}
+
+/** A background task: a shell the agent left running, a monitor, a subagent. */
+export interface TaskInfo {
+  id: string;
+  /** `shell`, `subagent`, `monitor`, `workflow`, `mcp`… */
+  kind: string;
+  description: string;
+  status: TaskStatus;
+}
+
+/** What `Thread.setMcpServers` changed. */
+export interface McpChangeResult {
+  added: string[];
+  removed: string[];
+  /** Servers that failed to start, with why. */
+  errors: Record<string, string>;
+}
+
+/** One piece of an MCP resource. */
+export interface McpResourceContent {
+  uri: string;
+  mimeType?: string;
+  text?: string;
+  /** Base64. */
+  blob?: string;
+}
+
+/**
+ * A thread's conversation in a form any runtime can take: what `export()`
+ * returns and `ThreadOptions.seed` accepts.
+ */
+export interface PortableTranscript {
+  provider: ProviderId;
+  threadId: string;
+  turns: HistoryTurn[];
+}
+
+/** Settings for `Thread.realtime`. */
+export interface RealtimeOptions {
+  /** `audio` to hear replies (`realtime.audio` events); `text` for transcripts only. Defaults to `text`. */
+  output?: "text" | "audio";
+  /** Instructions for the realtime model. */
+  instructions?: string;
+  model?: string;
+}
+
+/** Raw audio for a realtime session. */
+export interface AudioChunk {
+  /** Base64 PCM16. */
+  data: string;
+  sampleRate: number;
+  channels: number;
+}
+
+/** A live realtime session on a thread (Codex). Its output arrives as `realtime.*` events. */
+export interface RealtimeSession {
+  /** Sends text as the user (or as context). */
+  sendText(text: string, role?: "user" | "developer"): Promise<void>;
+  /** Sends a chunk of microphone audio. */
+  sendAudio(audio: AudioChunk): Promise<void>;
+  stop(): Promise<void>;
 }
 
 /** A conversation with one runtime. */
@@ -270,6 +682,47 @@ export interface Thread {
   interruptTurn(turnId: string): Promise<void>;
   /** The MCP servers this thread loaded, their state and tool names. No model call. */
   mcpStatus(): Promise<McpServerState[]>;
+  /**
+   * Drops `beforeTurnId` and every later turn from the conversation, so the
+   * next message carries on from just before it: how "edit an earlier prompt"
+   * works (rewind, then `run` the edited text). With `files: true` the files
+   * those turns changed are put back too, where `Capabilities.rewindFiles`.
+   * No turn may be running.
+   */
+  rewind(beforeTurnId: string, options?: { files?: boolean }): Promise<RewindResult>;
+  /** Every turn so far, read back from the runtime. */
+  history(): Promise<HistoryTurn[]>;
+  /** Sets the thread's title. */
+  rename(title: string): Promise<void>;
+  /** How full the context window is now. No model call. */
+  contextUsage(): Promise<ContextUsage>;
+  /** Sets a goal the agent keeps working towards, turn after turn, until it is met or paused. */
+  setGoal(objective: string, options?: { tokenBudget?: number }): Promise<Goal>;
+  goal(): Promise<Goal | undefined>;
+  clearGoal(): Promise<void>;
+  /** Reviews code as a turn of its own; the review is the turn's text. */
+  review(target: ReviewTarget): Turn;
+  /** Runs a shell command in the thread, as the user (`!cmd`); it shows in the thread like the agent's own. */
+  shell(command: string, options?: { timeoutMs?: number }): Promise<void>;
+  /** Background tasks still running: shells, monitors, subagents. */
+  tasks(): Promise<TaskInfo[]>;
+  stopTask(taskId: string): Promise<void>;
+  /** Replaces the thread's own MCP servers while it runs. */
+  setMcpServers(servers: Record<string, McpServer>): Promise<McpChangeResult>;
+  /** Restarts one MCP server (Codex reloads them all). */
+  reconnectMcp(server: string): Promise<void>;
+  toggleMcp(server: string, enabled: boolean): Promise<void>;
+  /** Starts an MCP server's OAuth sign-in; open the URL. */
+  mcpLogin(server: string): Promise<{ url: string }>;
+  readMcpResource(server: string, uri: string): Promise<McpResourceContent[]>;
+  /** Reloads skills from disk and returns the thread's commands afterwards. */
+  reloadSkills(): Promise<CommandInfo[]>;
+  /** Reloads plugins from disk. */
+  reloadPlugins(): Promise<void>;
+  /** The conversation in a form another runtime can carry on from (`ThreadOptions.seed`). */
+  export(): Promise<PortableTranscript>;
+  /** Opens a live voice or text session on the thread. */
+  realtime(options?: RealtimeOptions): Promise<RealtimeSession>;
   /** Stops the thread's process (Claude) or unloads it (Codex). The thread can be resumed later. */
   close(): Promise<void>;
 }
@@ -302,13 +755,18 @@ export interface TurnResult {
   status: "completed" | "interrupted" | "failed";
   /** The final agent message, when there is one. */
   text: string;
+  /** With an `outputSchema`: the reply, parsed. Undefined when it was not valid JSON. */
+  output?: unknown;
   usage?: TokenUsage;
   error?: TurnError;
 }
 
-/** Why a turn failed, classified so a consumer can react (retry later, sign in…). */
+/**
+ * Why a turn failed, classified so a consumer can react (retry later, sign in…).
+ * `limit` is one of the thread's own `limits` (too many round trips, the budget spent).
+ */
 export interface TurnError {
-  kind: "usage-limit" | "rate-limit" | "context-window" | "auth" | "model" | "connection" | "other";
+  kind: "usage-limit" | "rate-limit" | "context-window" | "auth" | "model" | "connection" | "limit" | "other";
   message: string;
   /** When a usage or rate limit resets, if the runtime said. */
   resetsAt?: Date;
@@ -461,9 +919,35 @@ export type AgentEvent = EventBase &
     | { type: "rate-limit"; limit: RateLimit }
     | { type: "compacted"; beforeTokens?: number; afterTokens?: number }
     | { type: "model.rerouted"; from: string; to: string }
-    | { type: "turn.completed"; status: "completed" | "interrupted"; text: string; usage?: TokenUsage }
+    /** Something the runtime wants the user to know that is not part of the reply: a warning, a refusal, a denied tool. */
+    | { type: "notice"; kind: NoticeKind; message: string; details?: string; raw?: unknown }
+    /** A hook (the user's, a project's, a plugin's or the host's) started or finished. */
+    | { type: "hook.started"; hookId: string; event: string; name?: string }
+    | { type: "hook.completed"; hookId: string; event: string; name?: string; status: "completed" | "failed" | "blocked" | "stopped"; output?: string }
+    /** The thread's goal changed; `goal` is null once cleared. */
+    | { type: "goal.updated"; goal: Goal | null }
+    /** An MCP server's state changed (started, ready, failed, needs sign-in). */
+    | { type: "mcp.status"; server: string; status: string; error?: string; needsLogin?: boolean }
+    | { type: "thread.renamed"; title: string }
+    /** A suggested next prompt, after a turn (`promptSuggestions`). */
+    | { type: "prompt.suggestion"; suggestion: string }
+    | { type: "realtime.started"; sessionId?: string }
+    | { type: "realtime.transcript.delta"; role: string; delta: string }
+    | { type: "realtime.transcript.done"; role: string; text: string }
+    | { type: "realtime.audio"; audio: AudioChunk }
+    | { type: "realtime.error"; message: string }
+    | { type: "realtime.closed"; reason?: string }
+    | { type: "turn.completed"; status: "completed" | "interrupted"; text: string; output?: unknown; usage?: TokenUsage }
     | { type: "turn.failed"; error: TurnError; usage?: TokenUsage }
   );
+
+/**
+ * What a notice is about. `warning` and `config` are the runtime's warnings,
+ * `deprecation` a feature on its way out, `refusal` the model declining,
+ * `permission-denied` a tool call a rule refused, `moderation` a safety check,
+ * `info` anything else the runtime chose to show.
+ */
+export type NoticeKind = "warning" | "config" | "deprecation" | "refusal" | "permission-denied" | "moderation" | "info";
 
 /** A question or approval the runtime is waiting on. Call `respond` exactly once. */
 export type AgentRequest = ApprovalRequest | QuestionRequest | ElicitationRequest;
@@ -472,8 +956,14 @@ export type AgentRequest = ApprovalRequest | QuestionRequest | ElicitationReques
 export interface ApprovalRequest {
   kind: "approval";
   id: string;
-  /** What it wants: run a command, change files, use a tool, widen its permissions. */
-  action: "command" | "file-change" | "tool" | "permissions";
+  /**
+   * What it wants: run a command, change files, use a tool, widen its
+   * permissions, or (`plan`) leave plan mode and carry out the plan in `plan`.
+   * Allowing a plan ends plan mode; denying it, with a message, keeps planning.
+   */
+  action: "command" | "file-change" | "tool" | "permissions" | "plan";
+  /** For `plan`: the proposed plan. */
+  plan?: string;
   /** One line for the UI. */
   title: string;
   command?: string;
@@ -522,8 +1012,9 @@ export interface ElicitationRequest {
   respond(answer: { action: "accept" | "decline" | "cancel"; content?: Record<string, unknown> }): Promise<void>;
 }
 
-/** One step of a stored transcript, for subagents. */
+/** One step of a stored transcript. */
 export type TranscriptEntry =
   | { kind: "message"; role: "user" | "assistant"; text: string }
   | { kind: "reasoning"; text: string }
-  | { kind: "tool"; tool: ToolCall; output?: string; isError?: boolean };
+  | { kind: "tool"; tool: ToolCall; output?: string; isError?: boolean }
+  | { kind: "files"; changes: FileChange[] };

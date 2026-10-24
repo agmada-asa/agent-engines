@@ -6,6 +6,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
 import { ClaudeEngine } from "../../src/claude/engine.ts";
+import { parityScenario } from "./parity.ts";
 import { LIVE, smokeScenario } from "./scenario.ts";
 
 const MODEL = process.env.AGENT_ENGINES_CLAUDE_MODEL ?? "claude-haiku-5-5";
@@ -51,4 +52,12 @@ test("Claude: AskUserQuestion surfaces as a request even with full access", { sk
     await engine.close();
     await rm(cwd, { recursive: true, force: true });
   }
+});
+
+test("Claude: plan mode, structured output, history, rename, fork, rewind with files, handoff, review", { skip: !LIVE && "set AGENT_ENGINES_LIVE=1", timeout: 900_000 }, async (t) => {
+  await parityScenario(
+    new ClaudeEngine(),
+    { model: MODEL, effort: "low", mcpServers: {}, claude: { settingSources: [], strictMcpConfig: true, skills: [] } },
+    (line) => t.diagnostic(line),
+  );
 });

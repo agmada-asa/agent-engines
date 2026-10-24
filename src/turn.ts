@@ -23,6 +23,8 @@ export class TurnHandle implements Turn {
   private finished = false;
   private iterated = false;
   private knownId?: string;
+  /** Whether this turn asked for structured output, so its reply is parsed into `output`. */
+  expectsOutput = false;
 
   constructor(
     readonly threadId: string,
@@ -95,9 +97,36 @@ export class TurnHandle implements Turn {
   }
 }
 
-/** Splits a turn input into text and images. */
-export function inputParts(input: TurnInput): { text: string; images: NonNullable<Exclude<TurnInput, string>["images"]> } {
-  return typeof input === "string" ? { text: input, images: [] } : { text: input.text, images: input.images ?? [] };
+/** Splits a turn input into text, images and files. */
+export function inputParts(input: TurnInput): {
+  text: string;
+  images: NonNullable<Exclude<TurnInput, string>["images"]>;
+  files: NonNullable<Exclude<TurnInput, string>["files"]>;
+} {
+  return typeof input === "string" ? { text: input, images: [], files: [] } : { text: input.text, images: input.images ?? [], files: input.files ?? [] };
+}
+
+/** Puts `prefix` before a turn input's text, keeping its images and files. */
+export function prefixInput(input: TurnInput, prefix: string): TurnInput {
+  if (!prefix) return input;
+  return typeof input === "string" ? prefix + input : { ...input, text: prefix + input.text };
+}
+
+/**
+ * A structured reply, parsed: the text as JSON, or the first fenced JSON block
+ * in it. Undefined when neither parses.
+ */
+export function parseOutput(text: string): unknown {
+  const attempts = [text.trim(), /```(?:json)?\s*([\s\S]*?)```/u.exec(text)?.[1]?.trim()];
+  for (const attempt of attempts) {
+    if (!attempt) continue;
+    try {
+      return JSON.parse(attempt);
+    } catch {
+      // Try the next form.
+    }
+  }
+  return undefined;
 }
 
 /** Delivers an event to thread listeners, isolating listener failures. */

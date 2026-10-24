@@ -12,6 +12,7 @@ import type {
   AgentEvent,
   AgentRequest,
   FileChange,
+  Goal,
   MessagePhase,
   PlanStep,
   RateLimit,
@@ -203,6 +204,39 @@ function threadStatus(status: Json | undefined): RuntimeStatus | undefined {
   return waitingOn.length ? { state: "waiting", waitingOn } : { state: "working" };
 }
 
+/** A Codex goal in the neutral shape. */
+export function codexGoal(goal: Json | undefined): Goal | undefined {
+  if (!goal || typeof goal.objective !== "string") return undefined;
+  const status: Goal["status"] =
+    goal.status === "usageLimited" ? "usage-limited"
+    : goal.status === "budgetLimited" ? "budget-limited"
+    : goal.status === "paused" || goal.status === "blocked" || goal.status === "complete" ? goal.status
+    : "active";
+  return {
+    objective: goal.objective,
+    status,
+    ...(typeof goal.tokenBudget === "number" ? { tokenBudget: goal.tokenBudget } : {}),
+    ...(typeof goal.tokensUsed === "number" ? { tokensUsed: goal.tokensUsed } : {}),
+    ...(typeof goal.timeUsedSeconds === "number" ? { timeUsedSeconds: goal.timeUsedSeconds } : {}),
+  };
+}
+
+/** A finished hook run's status in the neutral shape. */
+function hookStatus(status: unknown): "completed" | "failed" | "blocked" | "stopped" {
+  return status === "failed" || status === "blocked" || status === "stopped" ? status : "completed";
+}
+
+/** The text a hook run printed, joined. */
+function hookOutput(run: Json): string | undefined {
+  const text = (Array.isArray(run.entries) ? run.entries : []).map((entry: Json) => (typeof entry?.text === "string" ? entry.text : "")).filter(Boolean).join("\n");
+  return text || (typeof run.statusMessage === "string" && run.statusMessage ? run.statusMessage : undefined);
+}
+
+/** A realtime audio chunk in the neutral shape. */
+function audioChunk(audio: Json | undefined): { data: string; sampleRate: number; channels: number } {
+  return { data: String(audio?.data ?? ""), sampleRate: Number(audio?.sampleRate ?? 24_000), channels: Number(audio?.numChannels ?? 1) };
+}
+
 /** Most items of each kind remembered from `item/started` (agent message phases, proposed file changes). */
 const MAX_REMEMBERED_ITEMS = 256;
 
@@ -227,6 +261,8 @@ export class CodexNormalizer {
   private readonly phases = new Map<string, MessagePhase>();
   private readonly proposed = new Map<string, FileChange[]>();
   private latestUsage?: TokenUsage;
+  /** Tokens in the context after the last model call, and the window's size. */
+  context?: { usedTokens: number; maxTokens?: number };
 
   constructor(readonly threadId: string) {}
 
@@ -253,6 +289,8 @@ export class CodexNormalizer {
       this.limits = codexRateLimits(record(p.rateLimits));
       return this.limits.map((limit) => this.event({ type: "rate-limit", limit }));
     }
+    // An MCP server the app-server started for every thread.
+    if (method === "mcpServer/startupStatus/updated" && (p.threadId === null || p.threadId === undefined)) return [this.mcpStatus(p)];
     if (!this.owns(p.threadId)) return [];
     const agentId = p.threadId === this.threadId ? undefined : (p.threadId as string);
     const base = (turnId?: unknown) => ({
@@ -307,6 +345,11 @@ export class CodexNormalizer {
         const usage = codexUsage(record(p.tokenUsage));
         if (!usage) return [];
         this.latestUsage = usage;
+        const last = record(record(p.tokenUsage)?.last);
+        if (last) {
+          const window = record(p.tokenUsage)?.modelContextWindow;
+          this.context = { usedTokens: Number(last.totalTokens ?? 0), ...(typeof window === "number" ? { maxTokens: window } : {}) };
+        }
         return [{ ...base(p.turnId), type: "usage", usage }];
       }
       case "model/rerouted":
@@ -324,9 +367,66 @@ export class CodexNormalizer {
       }
       case "turn/completed":
         return agentId ? [] : this.turnCompleted(record(p.turn) ?? {});
+      case "hook/started": {
+        const run = record(p.run) ?? {};
+        return [{ ...base(p.turnId), type: "hook.started", hookId: String(run.id), event: String(run.eventName ?? ""), ...(typeof run.sourcePath === "string" ? { name: run.sourcePath } : {}) }];
+      }
+      case "hook/completed": {
+        const run = record(p.run) ?? {};
+        const output = hookOutput(run);
+        return [{
+          ...base(p.turnId),
+          type: "hook.completed",
+          hookId: String(run.id),
+          event: String(run.eventName ?? ""),
+          ...(typeof run.sourcePath === "string" ? { name: run.sourcePath } : {}),
+          status: hookStatus(run.status),
+          ...(output ? { output } : {}),
+        }];
+      }
+      case "thread/goal/updated": {
+        if (agentId) return [];
+        const goal = codexGoal(record(p.goal));
+        return goal ? [{ ...base(p.turnId), type: "goal.updated", goal }] : [];
+      }
+      case "thread/goal/cleared":
+        return agentId ? [] : [{ ...base(), type: "goal.updated", goal: null }];
+      case "mcpServer/startupStatus/updated":
+        return [{ ...this.mcpStatus(p), ...(agentId ? { agentId } : {}) } as AgentEvent];
+      case "thread/name/updated":
+        return agentId || typeof p.threadName !== "string" ? [] : [{ ...base(), type: "thread.renamed", title: p.threadName }];
+      case "warning":
+      case "guardianWarning":
+        return typeof p.message === "string" ? [{ ...base(), type: "notice", kind: "warning", message: p.message, raw: params }] : [];
+      case "model/verification":
+        return [{ ...base(p.turnId), type: "notice", kind: "moderation", message: `Model verification: ${(Array.isArray(p.verifications) ? p.verifications : []).join(", ")}`, raw: params }];
+      case "thread/realtime/started":
+        return [{ ...base(), type: "realtime.started", ...(typeof p.realtimeSessionId === "string" ? { sessionId: p.realtimeSessionId } : {}) }];
+      case "thread/realtime/transcript/delta":
+        return [{ ...base(), type: "realtime.transcript.delta", role: String(p.role ?? ""), delta: String(p.delta ?? "") }];
+      case "thread/realtime/transcript/done":
+        return [{ ...base(), type: "realtime.transcript.done", role: String(p.role ?? ""), text: String(p.text ?? "") }];
+      case "thread/realtime/outputAudio/delta":
+        return [{ ...base(), type: "realtime.audio", audio: audioChunk(record(p.audio)) }];
+      case "thread/realtime/error":
+        return [{ ...base(), type: "realtime.error", message: String(p.message ?? "") }];
+      case "thread/realtime/closed":
+        return [{ ...base(), type: "realtime.closed", ...(typeof p.reason === "string" && p.reason ? { reason: p.reason } : {}) }];
       default:
         return [];
     }
+  }
+
+  private mcpStatus(p: Json): AgentEvent {
+    return {
+      threadId: this.threadId,
+      turnId: this.currentTurnId,
+      type: "mcp.status",
+      server: String(p.name ?? ""),
+      status: String(p.status ?? "unknown"),
+      ...(typeof p.error === "string" && p.error ? { error: p.error } : {}),
+      ...(p.failureReason === "reauthenticationRequired" ? { needsLogin: true } : {}),
+    };
   }
 
   private itemStarted(item: Json, base: { threadId: string; turnId: string; agentId?: string }): AgentEvent[] {
@@ -367,6 +467,12 @@ export class CodexNormalizer {
         return [{ ...base, type: "compacted" }];
       case "plan":
         return [{ ...base, type: "plan.proposal.done", itemId, text: String(item.text ?? "") }];
+      case "exitedReviewMode": {
+        // A review's findings are its turn's reply.
+        const text = String(item.review ?? "");
+        if (!agentId && text) this.turnText.set(base.turnId, text);
+        return text ? [{ ...base, type: "text.done", itemId, text, phase: "answer" }] : [];
+      }
       case "subAgentActivity":
         if (item.kind === "completed" || item.kind === "interrupted") {
           return this.subagentEnded(base, String(item.agentThreadId), item.kind === "completed" ? "completed" : "stopped");
