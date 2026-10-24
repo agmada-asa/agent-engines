@@ -14,9 +14,11 @@ import type { ModelUsage, SDKMessage } from "@anthropic-ai/claude-agent-sdk";
 import type {
   AgentEvent,
   FileChange,
+  HistoryTurn,
   PlanStep,
   RateLimit,
   RuntimeStatus,
+  TaskInfo,
   TaskStatus,
   TaskUsage,
   TokenUsage,
@@ -156,6 +158,8 @@ export class ClaudeNormalizer {
   /** Non-agent tasks seen so far → the subagent that launched each, if any; and those that have ended. */
   private readonly tasks = new Map<string, string | undefined>();
   private readonly endedTasks = new Set<string>();
+  /** What each task and subagent is, for `Thread.tasks`. */
+  private readonly taskInfo = new Map<string, TaskInfo>();
   /** message id → block index → item id, for streamed blocks. */
   private readonly streamBlocks = new Map<string, Map<number, string>>();
   /** message id → block type → count, so streamed and whole blocks get the same item IDs. */
@@ -168,6 +172,11 @@ export class ClaudeNormalizer {
   /** Subagent task IDs seen so far. */
   get subagentIds(): string[] {
     return [...this.subagents];
+  }
+
+  /** Tasks and subagents still running, as far as this thread saw. */
+  runningTasks(): TaskInfo[] {
+    return [...this.taskInfo.values()].filter((task) => task.status === "running" || task.status === "pending" || task.status === "paused");
   }
 
   /** Clears per-turn state. */
@@ -204,6 +213,8 @@ export class ClaudeNormalizer {
         }];
       case "system":
         return this.system(m, { threadId: this.threadId, turnId });
+      case "prompt_suggestion":
+        return typeof m.suggestion === "string" && m.suggestion ? [{ threadId: this.threadId, turnId, type: "prompt.suggestion", suggestion: m.suggestion }] : [];
       default:
         return [];
     }
@@ -259,6 +270,9 @@ export class ClaudeNormalizer {
         events.push({ ...base, type: "tool.started", itemId: String(block.id), tool });
         const steps = name === "TodoWrite" ? todoSteps(block.input) : undefined;
         if (steps) events.push({ ...base, type: "plan.updated", steps, itemId: String(block.id) });
+        // Plan mode ends with the plan put to the user, as Codex's plan proposal is.
+        const plan = name === "ExitPlanMode" ? record(block.input)?.plan : undefined;
+        if (typeof plan === "string" && plan) events.push({ ...base, type: "plan.proposal.done", itemId: String(block.id), text: plan });
       }
     }
     return events;
@@ -292,6 +306,7 @@ export class ClaudeNormalizer {
         if (typeof m.tool_use_id === "string") this.taskByToolUse.set(m.tool_use_id, id);
         if (this.subagents.has(id)) return [];
         this.subagents.add(id);
+        this.taskInfo.set(id, { id, kind: "subagent", description: String(m.description ?? ""), status: "running" });
         return [{
           ...base,
           type: "subagent.started",
@@ -315,6 +330,8 @@ export class ClaudeNormalizer {
       case "task_updated": {
         const patch = record(m.patch) ?? {};
         const status = taskStatus(patch.status);
+        const known = this.taskInfo.get(String(m.task_id));
+        if (known && status) known.status = status;
         const update = {
           ...(status ? { status } : {}),
           ...(typeof patch.description === "string" && patch.description ? { description: patch.description } : {}),
@@ -329,6 +346,8 @@ export class ClaudeNormalizer {
         if (!this.subagents.has(id) || this.endedSubagents.has(id)) return [];
         this.endedSubagents.add(id);
         const status = m.status === "completed" ? "completed" : m.status === "failed" ? "failed" : "stopped";
+        const known = this.taskInfo.get(id);
+        if (known) known.status = status;
         return [{ ...base, type: "subagent.ended", subagentId: id, status, ...(typeof m.summary === "string" && m.summary ? { summary: m.summary } : {}) }];
       }
       case "compact_boundary": {
@@ -360,6 +379,40 @@ export class ClaudeNormalizer {
       }
       case "model_refusal_fallback":
         return [{ ...base, type: "model.rerouted", from: String(m.original_model), to: String(m.fallback_model) }];
+      case "model_refusal_no_fallback":
+        return [{ ...base, type: "notice", kind: "refusal", message: String(m.message ?? m.reason ?? "The model declined this request."), raw: m }];
+      case "hook_started":
+        return [{ ...base, type: "hook.started", hookId: String(m.hook_id), event: String(m.hook_event ?? ""), ...(typeof m.hook_name === "string" ? { name: m.hook_name } : {}) }];
+      case "hook_response": {
+        const output = [m.output, m.stdout, m.stderr].find((text) => typeof text === "string" && text.trim());
+        return [{
+          ...base,
+          type: "hook.completed",
+          hookId: String(m.hook_id),
+          event: String(m.hook_event ?? ""),
+          ...(typeof m.hook_name === "string" ? { name: m.hook_name } : {}),
+          status: m.outcome === "error" ? "failed" : m.outcome === "cancelled" ? "stopped" : "completed",
+          ...(output ? { output } : {}),
+        }];
+      }
+      case "notification":
+        return typeof m.text === "string" && m.text ? [{ ...base, type: "notice", kind: "info", message: m.text, raw: m }] : [];
+      case "informational":
+        return typeof m.content === "string" && m.content
+          ? [{ ...base, type: "notice", kind: m.level === "warning" ? "warning" : "info", message: m.content, raw: m }]
+          : [];
+      case "permission_denied":
+        return [{
+          ...base,
+          ...(typeof m.agent_id === "string" && m.agent_id ? { agentId: m.agent_id } : {}),
+          type: "notice",
+          kind: "permission-denied",
+          message: String(m.message ?? `${m.tool_name} was not allowed.`),
+          ...(typeof m.decision_reason === "string" && m.decision_reason ? { details: m.decision_reason } : {}),
+          raw: m,
+        }];
+      case "init":
+        return (Array.isArray(m.mcp_servers) ? m.mcp_servers : []).map((server: Json) => ({ ...base, type: "mcp.status" as const, server: String(server?.name ?? ""), status: String(server?.status ?? "unknown") }));
       default:
         return [];
     }
@@ -370,6 +423,7 @@ export class ClaudeNormalizer {
     // A task a subagent launched belongs to that subagent's events.
     const parent = typeof m.parent_task_id === "string" && this.subagents.has(m.parent_task_id) ? m.parent_task_id : undefined;
     this.tasks.set(id, parent);
+    this.taskInfo.set(id, { id, kind: TASK_KINDS[m.task_type] ?? String(m.task_type), description: String(m.description ?? ""), status: "running" });
     return [{
       ...this.taskBase(base, id),
       type: "task.started",
@@ -390,6 +444,8 @@ export class ClaudeNormalizer {
   private taskEnded(m: Json, base: { threadId: string; turnId: string }, id: string): AgentEvent[] {
     if (this.endedTasks.has(id)) return [];
     this.endedTasks.add(id);
+    const known = this.taskInfo.get(id);
+    if (known) known.status = m.status === "completed" ? "completed" : m.status === "failed" ? "failed" : "stopped";
     const usage = taskUsage(record(m.usage));
     return [{
       ...this.taskBase(base, id),
@@ -459,4 +515,36 @@ export function claudeTranscript(messages: ReadonlyArray<{ type: string; message
     }
   }
   return entries;
+}
+
+/** Whether a stored message is a prompt (the start of a turn) rather than tool results or a subagent's. */
+export function isPrompt(message: { type: string; message: unknown; parent_tool_use_id?: string | null }): boolean {
+  if (message.type !== "user" || message.parent_tool_use_id) return false;
+  const content = record(message.message)?.content;
+  if (typeof content === "string") return content.trim().length > 0;
+  if (!Array.isArray(content)) return false;
+  return !content.some((block: Json) => block?.type === "tool_result") && content.some((block: Json) => block?.type === "text" || block?.type === "image" || block?.type === "document");
+}
+
+/**
+ * A stored session as turns. A turn starts at each prompt and its ID is the
+ * prompt's UUID, which is the turn ID the engine gave it.
+ */
+export function claudeHistory(messages: ReadonlyArray<{ type: string; uuid: string; message: unknown; parent_tool_use_id?: string | null }>): HistoryTurn[] {
+  const turns: HistoryTurn[] = [];
+  let group: typeof messages[number][] = [];
+  const flush = () => {
+    if (!group.length) return;
+    const entries = claudeTranscript(group);
+    const answered = entries.some((entry) => entry.kind === "message" && entry.role === "assistant");
+    turns.push({ id: group[0]!.uuid, status: answered ? "completed" : "unknown", entries });
+    group = [];
+  };
+  for (const message of messages) {
+    if (message.parent_tool_use_id) continue;
+    if (isPrompt(message)) flush();
+    if (group.length || isPrompt(message)) group.push(message);
+  }
+  flush();
+  return turns;
 }

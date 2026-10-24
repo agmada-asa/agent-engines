@@ -38,3 +38,28 @@ export class RuntimeModelSubstitutionError extends AgentEngineError {
 
 /** A steer that the runtime would not add to the running turn (none running, or a compaction). */
 export class SteerRejectedError extends AgentEngineError {}
+
+/**
+ * A rewind put the files back but the runtime did not drop the turns, so the
+ * conversation still holds them. `files` says what was put back.
+ */
+export class ConversationRevertError extends AgentEngineError {
+  constructor(
+    readonly files: { paths: string[]; method?: "checkpoint" | "edits"; skipped?: string[] },
+    cause: unknown,
+  ) {
+    super(`The files were put back, but the conversation was not rewound: ${cause instanceof Error ? cause.message : String(cause)}`, { cause });
+  }
+}
+
+/** The runtime cannot do this; `Engine.capabilities()` lists what it can. */
+export class UnsupportedFeatureError extends AgentEngineError {
+  /** Creates the error for one feature on one runtime. */
+  constructor(
+    readonly feature: string,
+    readonly provider: string,
+    detail?: string,
+  ) {
+    super(`${provider} cannot ${feature}${detail ? `: ${detail}` : "."}`);
+  }
+}

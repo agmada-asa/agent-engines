@@ -3,22 +3,27 @@
  * Code process in streaming-input mode: `run` sends a user message, `steer`
  * sends another while the turn runs, and a `result` message ends the turn. The
  * thread ID is the Claude session ID, chosen here so it is known before the
- * first prompt and can be resumed later in the same `cwd`.
+ * first prompt and can be resumed later in the same `cwd`. Each turn's ID is
+ * the UUID of the prompt that started it, so fork and rewind can find it in the
+ * transcript.
  *
  * If the process exits, the running turn fails with a `connection` error and the
- * next call starts a new process on the same session.
+ * next call starts a new process on the same session. Settings Claude Code only
+ * takes at launch (an output schema, the access level) restart the process the
+ * same way, keeping the session.
  */
 
 import { randomUUID } from "node:crypto";
 import { homedir, tmpdir } from "node:os";
 import { isAbsolute, join } from "node:path";
-import { readdir, rm, rmdir } from "node:fs/promises";
+import { readFile, readdir, rm, rmdir } from "node:fs/promises";
 import * as sdkModule from "@anthropic-ai/claude-agent-sdk";
 import type {
   CanUseTool,
   McpServerConfig,
   OnElicitation,
   Options,
+  PermissionMode,
   PermissionResult,
   Query,
   SDKControlInitializeResponse,
@@ -32,20 +37,47 @@ import {
   RuntimeConnectionError,
   RuntimeModelUnavailableError,
   SteerRejectedError,
+  UnsupportedFeatureError,
 } from "../errors.ts";
 import { checkMinimumVersion } from "../compat.ts";
-import { TurnHandle, emitTo, inputParts } from "../turn.ts";
+import { attachedFilesNote, isTextMedia, localFileSearch, mediaTypeOf, readFileInput, saveAttachment } from "../files.ts";
+import { seedPreamble } from "../handoff.ts";
+import { reviewPrompt } from "../review.ts";
+import { TurnHandle, emitTo, inputParts, parseOutput, prefixInput } from "../turn.ts";
 import type {
+  Access,
   AgentEvent,
   AgentRequest,
   Availability,
+  Capabilities,
   CommandInfo,
+  ContextUsage,
+  EffectiveConfig,
   Engine,
+  EngineEvent,
+  FileMatch,
+  ForkOptions,
+  Goal,
+  HistoryTurn,
   LastTurn,
+  ListThreadsOptions,
+  LoginFlow,
+  McpChangeResult,
+  McpResourceContent,
+  McpServer,
   McpServerState,
   ModelInfo,
+  PluginInfo,
+  PortableTranscript,
+  RealtimeSession,
+  ReviewTarget,
+  RewindResult,
+  TaskInfo,
   Thread,
+  ThreadHistory,
+  ThreadMode,
   ThreadOptions,
+  ThreadSummary,
   TranscriptEntry,
   Turn,
   TurnInput,
@@ -54,7 +86,7 @@ import type {
   UsageReport,
   UsageWindow,
 } from "../types.ts";
-import { ClaudeNormalizer, claudeTranscript, claudeUsage, classifyClaudeError } from "./normalize.ts";
+import { ClaudeNormalizer, claudeHistory, claudeTranscript, claudeUsage, classifyClaudeError, isPrompt } from "./normalize.ts";
 
 /** Oldest Claude Code this library has been checked against. */
 export const CLAUDE_CODE_MIN_VERSION = "2.1.248";
@@ -65,11 +97,60 @@ const API_KEY_VARIABLES = ["ANTHROPIC_API_KEY", "ANTHROPIC_AUTH_TOKEN", "ANTHROP
 /** How long the no-prompt probe waits for Claude Code to initialise. */
 const PROBE_TIMEOUT_MS = 30_000;
 
+/** How long a prewarmed thread waits for a `startThread` to claim it before it is closed. */
+const SPARE_TTL_MS = 10 * 60_000;
+
 /** Built-in tools that change files or run commands; off in `read-only` access. */
 const WRITE_TOOLS = ["Edit", "Write", "MultiEdit", "NotebookEdit", "Bash"];
 
+/** Image types Claude takes. */
+const IMAGE_TYPES = new Set(["image/png", "image/jpeg", "image/webp", "image/gif"]);
+
+/** What Claude can do through the Agent SDK. */
+export const CLAUDE_CAPABILITIES: Capabilities = {
+  provider: "claude",
+  steer: true,
+  compact: true,
+  fork: true,
+  rewind: true,
+  rewindFiles: true,
+  history: true,
+  rename: true,
+  archive: false,
+  access: ["full", "auto", "accept-edits", "ask", "read-only"],
+  modes: ["default", "plan"],
+  structuredOutput: true,
+  contextUsage: true,
+  images: true,
+  files: "content",
+  goals: false,
+  review: "prompt",
+  shell: false,
+  listTasks: true,
+  stopTask: true,
+  mcp: { setServers: true, reconnect: true, toggle: true, login: false, readResource: true },
+  login: false,
+  logout: false,
+  hookEvents: true,
+  hookCallbacks: true,
+  limits: ["maxTurns", "maxBudgetUsd", "tokenBudget"],
+  handoff: "prompt",
+  prewarmThreads: true,
+  fileSearch: "local",
+  agents: true,
+  skills: { reload: true, toggle: false },
+  plugins: { list: true, install: false, reload: true },
+  config: true,
+  realtime: false,
+  promptSuggestions: true,
+  liveOutput: { commandOutput: false, diff: false, planProposal: true },
+};
+
 /** The SDK functions the engine uses; tests inject a fake. */
-export type ClaudeSdk = Readonly<Pick<typeof sdkModule, "query" | "deleteSession" | "getSubagentMessages" | "getSessionInfo" | "getSessionMessages">>;
+export type ClaudeSdk = Readonly<Pick<
+  typeof sdkModule,
+  "query" | "deleteSession" | "getSubagentMessages" | "getSessionInfo" | "getSessionMessages" | "forkSession" | "listSessions" | "renameSession" | "resolveSettings"
+>>;
 
 /** Engine-wide settings for Claude. */
 export interface ClaudeEngineOptions {
@@ -86,30 +167,52 @@ export interface ClaudeEngineOptions {
   requireSubscription?: boolean;
   /** Oldest Claude Code version accepted. */
   minimumVersion?: string;
-  /** Claude's config directory, for `deleteThread`; defaults to `CLAUDE_CONFIG_DIR` or `~/.claude`. */
+  /**
+   * Claude's config directory (`CLAUDE_CONFIG_DIR`): its sign-in, settings and
+   * sessions. Defaults to `CLAUDE_CONFIG_DIR` or `~/.claude`. Point two engines
+   * at two folders to use two accounts side by side.
+   */
   configDir?: string;
 }
 
-/** Turns a `TurnInput` into SDK message content. */
-function claudeContent(input: TurnInput): SDKUserMessage["message"]["content"] {
-  const { text, images } = inputParts(input);
-  if (!images.length) return text;
-  return [
-    { type: "text", text },
-    ...images.map((image) => {
-      if (image.type === "base64") return { type: "image" as const, source: { type: "base64" as const, media_type: image.mediaType, data: image.data } };
-      throw new AgentEngineError("Claude takes images as base64; read the file and pass { type: \"base64\" }.");
-    }),
-  ];
+/** Turns a `TurnInput` into SDK message content: images and PDFs as blocks, text files as documents, anything else by path. */
+async function claudeContent(input: TurnInput): Promise<SDKUserMessage["message"]["content"]> {
+  const { text, images, files } = inputParts(input);
+  if (!images.length && !files.length) return text;
+  const blocks: Array<Record<string, unknown>> = [];
+  for (const image of images) {
+    if (image.type === "base64") {
+      blocks.push({ type: "image", source: { type: "base64", media_type: image.mediaType, data: image.data } });
+      continue;
+    }
+    const mediaType = mediaTypeOf(image.path);
+    if (!IMAGE_TYPES.has(mediaType)) throw new AgentEngineError(`Claude takes PNG, JPEG, WebP or GIF images; ${image.path} is not one.`);
+    blocks.push({ type: "image", source: { type: "base64", media_type: mediaType, data: (await readFile(image.path)).toString("base64") } });
+  }
+  const named: string[] = [];
+  for (const file of files) {
+    const read = await readFileInput(file);
+    if (read.mediaType === "application/pdf") {
+      blocks.push({ type: "document", title: read.name, source: { type: "base64", media_type: "application/pdf", data: read.data.toString("base64") } });
+    } else if (isTextMedia(read.mediaType)) {
+      blocks.push({ type: "document", title: read.name, source: { type: "text", media_type: "text/plain", data: read.data.toString("utf8") } });
+    } else if (IMAGE_TYPES.has(read.mediaType)) {
+      blocks.push({ type: "image", source: { type: "base64", media_type: read.mediaType, data: read.data.toString("base64") } });
+    } else {
+      named.push(read.path ?? await saveAttachment(read.name, read.data));
+    }
+  }
+  return [{ type: "text", text: text + attachedFilesNote(named) }, ...blocks] as unknown as SDKUserMessage["message"]["content"];
 }
 
-/** A user message for the input stream. */
-function userMessage(input: TurnInput, priority?: "next"): SDKUserMessage {
+/** A user message for the input stream. A prompt's `uuid` is its turn ID. */
+function userMessage(content: SDKUserMessage["message"]["content"], options: { priority?: "next"; uuid?: string } = {}): SDKUserMessage {
   return {
     type: "user",
-    message: { role: "user", content: claudeContent(input) },
+    message: { role: "user", content },
     parent_tool_use_id: null,
-    ...(priority ? { priority } : {}),
+    ...(options.priority ? { priority: options.priority } : {}),
+    ...(options.uuid ? { uuid: options.uuid } : {}),
   } as SDKUserMessage;
 }
 
@@ -239,11 +342,50 @@ export function claudeCommands(init: Pick<SDKControlInitializeResponse, "command
   return commands;
 }
 
+/** A session listing in the neutral shape. Claude's times are Unix milliseconds. */
+function claudeSummary(info: { sessionId: string; summary?: string; lastModified?: number; customTitle?: string; firstPrompt?: string; gitBranch?: string; cwd?: string; createdAt?: number }): ThreadSummary {
+  const title = info.customTitle ?? info.summary;
+  return {
+    id: info.sessionId,
+    provider: "claude",
+    ...(info.cwd ? { cwd: info.cwd } : {}),
+    ...(title ? { title } : {}),
+    ...(info.firstPrompt ? { preview: info.firstPrompt } : {}),
+    ...(info.createdAt ? { createdAt: new Date(info.createdAt) } : {}),
+    ...(info.lastModified ? { updatedAt: new Date(info.lastModified) } : {}),
+    ...(info.gitBranch ? { gitBranch: info.gitBranch } : {}),
+  };
+}
+
+/**
+ * A key that is equal for equal thread options: plain values by content,
+ * functions and objects such as in-process MCP servers by identity.
+ */
+function optionsKey(options: ThreadOptions): string {
+  const ids = new WeakMap<object, number>();
+  let next = 0;
+  const identity = (value: object) => {
+    if (!ids.has(value)) ids.set(value, next++);
+    return `#${ids.get(value)}`;
+  };
+  return JSON.stringify(options, (_key, value: unknown) => {
+    if (typeof value === "function") return identity(value);
+    if (value && typeof value === "object" && !Array.isArray(value)) {
+      const proto = Object.getPrototypeOf(value);
+      if (proto !== Object.prototype && proto !== null) return identity(value);
+      return Object.fromEntries(Object.entries(value).sort(([a], [b]) => a.localeCompare(b)));
+    }
+    return value;
+  });
+}
+
 /** Claude through the Claude Agent SDK. */
 export class ClaudeEngine implements Engine {
   readonly provider = "claude" as const;
   private readonly sdk: ClaudeSdk;
   private readonly threads = new Set<ClaudeThread>();
+  private readonly listeners = new Set<(event: EngineEvent) => void>();
+  private readonly spares: Array<{ key: string; thread: Promise<ClaudeThread>; timer: ReturnType<typeof setTimeout> }> = [];
 
   constructor(readonly options: ClaudeEngineOptions = {}) {
     this.sdk = options.sdk ?? sdkModule;
@@ -260,6 +402,10 @@ export class ClaudeEngine implements Engine {
       }
       return { provider: "claude", ready: false, reason: "probe-failed", message: `Claude Code did not start: ${message}` };
     }
+  }
+
+  async capabilities(): Promise<Capabilities> {
+    return structuredClone(CLAUDE_CAPABILITIES);
   }
 
   async models(): Promise<ModelInfo[]> {
@@ -284,6 +430,14 @@ export class ClaudeEngine implements Engine {
   }
 
   async startThread(options: ThreadOptions): Promise<Thread> {
+    const spare = this.claimSpare(options);
+    if (spare) {
+      const thread = await spare.catch(() => undefined);
+      if (thread && !thread.isClosed) {
+        this.threads.add(thread);
+        return thread;
+      }
+    }
     const thread = new ClaudeThread(this, this.sdk, options, randomUUID(), false);
     await thread.open();
     this.threads.add(thread);
@@ -299,6 +453,19 @@ export class ClaudeEngine implements Engine {
     return thread;
   }
 
+  async forkThread(threadId: string, options: ForkOptions): Promise<Thread> {
+    let upToMessageId: string | undefined;
+    if (options.throughTurnId) {
+      const messages = await this.sdk.getSessionMessages(threadId, { dir: options.cwd, includeSystemMessages: true });
+      upToMessageId = lastEntryOfTurn(messages, options.throughTurnId);
+    }
+    const forked = await this.sdk.forkSession(threadId, { dir: options.cwd, ...(upToMessageId ? { upToMessageId } : {}), ...(options.title ? { title: options.title } : {}) });
+    const thread = new ClaudeThread(this, this.sdk, options, forked.sessionId, true);
+    await thread.open();
+    this.threads.add(thread);
+    return thread;
+  }
+
   /**
    * Deletes the session transcript (the SDK's `deleteSession`), then the files
    * Claude Code keeps beside it: subagent transcripts, session environment,
@@ -308,7 +475,7 @@ export class ClaudeEngine implements Engine {
     if (!/^[A-Za-z0-9_-]{1,128}$/u.test(threadId)) throw new AgentEngineError("That is not a Claude session ID.");
     const owner = [...this.threads].find((thread) => thread.id === threadId);
     await owner?.close();
-    const home = this.options.configDir ?? process.env.CLAUDE_CONFIG_DIR ?? join(homedir(), ".claude");
+    const home = this.configHome;
     const mine = (name: string) => name === threadId || name.startsWith(`${threadId}.`) || name.startsWith(`${threadId}-`);
     // Found before deleteSession removes the transcript, so emptied project folders can be tidied after.
     const projects = join(home, "projects");
@@ -325,7 +492,116 @@ export class ClaudeEngine implements Engine {
     for (const dir of ["session-env", "file-history", "todos", "debug", "shell-snapshots"]) await removeMatching(join(home, dir), mine);
   }
 
+  async listThreads(options: ListThreadsOptions = {}): Promise<ThreadSummary[]> {
+    // Claude does not archive sessions, so there are no archived ones to list.
+    if (options.archived) return [];
+    const limit = options.limit ?? 50;
+    const search = options.search?.toLowerCase();
+    const sessions = await this.sdk.listSessions({ ...(options.cwd ? { dir: options.cwd } : {}), ...(search ? {} : { limit }) });
+    return sessions
+      .map(claudeSummary)
+      .filter((summary) => !search || [summary.title, summary.preview].some((text) => text?.toLowerCase().includes(search)))
+      .sort((a, b) => (b.updatedAt?.getTime() ?? 0) - (a.updatedAt?.getTime() ?? 0))
+      .slice(0, limit);
+  }
+
+  async readThread(threadId: string, options: { cwd: string }): Promise<ThreadHistory> {
+    const info = await this.sdk.getSessionInfo(threadId, { dir: options.cwd });
+    const messages = await this.sdk.getSessionMessages(threadId, { dir: options.cwd });
+    return { ...claudeSummary(info ?? { sessionId: threadId, cwd: options.cwd }), turns: claudeHistory(messages) };
+  }
+
+  async renameThread(threadId: string, title: string, options: { cwd: string }): Promise<void> {
+    await this.sdk.renameSession(threadId, title, { dir: options.cwd });
+  }
+
+  async archiveThread(_threadId: string, _options: { cwd: string }): Promise<void> {
+    throw new UnsupportedFeatureError("archive threads", "Claude", "keep an archived flag in the app, or delete the thread");
+  }
+
+  async unarchiveThread(_threadId: string, _options: { cwd: string }): Promise<void> {
+    throw new UnsupportedFeatureError("archive threads", "Claude");
+  }
+
+  async login(): Promise<LoginFlow> {
+    throw new UnsupportedFeatureError("start a sign-in", "Claude", "run `claude` and sign in there");
+  }
+
+  async logout(): Promise<void> {
+    throw new UnsupportedFeatureError("sign out", "Claude", "run `claude` and use /logout");
+  }
+
+  /**
+   * Without options, checks Claude Code starts and is signed in. With thread
+   * options, opens that thread's process now; the next `startThread` with equal
+   * options gets it, already initialised. An unclaimed one closes after ten minutes.
+   */
+  async prewarm(options?: ThreadOptions): Promise<void> {
+    if (!options) {
+      await this.probe();
+      return;
+    }
+    const thread = new ClaudeThread(this, this.sdk, options, randomUUID(), false);
+    const opening = thread.open().then(() => thread);
+    const key = optionsKey(options);
+    const timer = setTimeout(() => {
+      const index = this.spares.findIndex((spare) => spare.thread === opening);
+      if (index >= 0) this.spares.splice(index, 1);
+      void opening.then((spare) => spare.close(), () => undefined);
+    }, SPARE_TTL_MS);
+    timer.unref?.();
+    this.spares.push({ key, thread: opening, timer });
+    await opening;
+  }
+
+  async searchFiles(query: string, options: { cwd: string; limit?: number }): Promise<FileMatch[]> {
+    return localFileSearch(query, options.cwd, options.limit);
+  }
+
+  async config(options: { cwd?: string } = {}): Promise<EffectiveConfig> {
+    const resolved = await this.sdk.resolveSettings({ ...(options.cwd ? { cwd: options.cwd } : {}) });
+    return {
+      provider: "claude",
+      values: resolved.effective as Record<string, unknown>,
+      sources: resolved.sources.map((source) => ({ name: String(source.source), ...(source.path ? { path: source.path } : {}), values: source.settings as Record<string, unknown> })),
+    };
+  }
+
+  async plugins(options: { cwd?: string } = {}): Promise<PluginInfo[]> {
+    const cwd = options.cwd ?? tmpdir();
+    const response = await this.withProbe((query) => query.reloadPlugins(), { cwd });
+    return response.plugins.map((plugin) => ({
+      id: plugin.name,
+      name: plugin.name,
+      installed: true,
+      enabled: true,
+      ...(plugin.source ? { marketplace: plugin.source } : {}),
+      ...(plugin.version ? { version: plugin.version } : {}),
+    }));
+  }
+
+  async installPlugin(_plugin: { name: string; marketplace?: string }): Promise<void> {
+    throw new UnsupportedFeatureError("install plugins", "Claude", "run `claude plugin install`, or pass local plugins in claude.plugins");
+  }
+
+  async uninstallPlugin(_pluginId: string): Promise<void> {
+    throw new UnsupportedFeatureError("uninstall plugins", "Claude", "run `claude plugin uninstall`");
+  }
+
+  async setSkillEnabled(_name: string, _enabled: boolean): Promise<void> {
+    throw new UnsupportedFeatureError("turn skills on or off", "Claude", "choose a thread's skills with claude.skills");
+  }
+
+  subscribe(listener: (event: EngineEvent) => void): () => void {
+    this.listeners.add(listener);
+    return () => this.listeners.delete(listener);
+  }
+
   async close(): Promise<void> {
+    for (const spare of this.spares.splice(0)) {
+      clearTimeout(spare.timer);
+      await spare.thread.then((thread) => thread.close(), () => undefined);
+    }
     for (const thread of [...this.threads]) await thread.close().catch(() => undefined);
   }
 
@@ -339,14 +615,31 @@ export class ClaudeEngine implements Engine {
     return this.options.minimumVersion ?? CLAUDE_CODE_MIN_VERSION;
   }
 
+  /** @internal Claude's config folder. */
+  get configHome(): string {
+    return this.options.configDir ?? process.env.CLAUDE_CONFIG_DIR ?? join(homedir(), ".claude");
+  }
+
   /** @internal The child environment: base plus thread extras, minus API keys when required. */
   environment(extra: Record<string, string> = {}): Record<string, string> {
     const env: Record<string, string> = { CLAUDE_AGENT_SDK_CLIENT_APP: "agent-engines" };
     for (const [key, value] of Object.entries({ ...(this.options.env ?? process.env), ...extra })) {
       if (value !== undefined) env[key] = value;
     }
+    if (this.options.configDir) env.CLAUDE_CONFIG_DIR = this.options.configDir;
     if (this.options.requireSubscription !== false) for (const name of API_KEY_VARIABLES) delete env[name];
     return env;
+  }
+
+  /** A prewarmed thread opened with these options, taken off the shelf. */
+  private claimSpare(options: ThreadOptions): Promise<ClaudeThread> | undefined {
+    if (!this.spares.length) return undefined;
+    const key = optionsKey(options);
+    const index = this.spares.findIndex((spare) => spare.key === key);
+    if (index < 0) return undefined;
+    const [spare] = this.spares.splice(index, 1);
+    clearTimeout(spare!.timer);
+    return spare!.thread;
   }
 
   /** Starts Claude Code without a prompt, reads its init result and stops it. No model is called. */
@@ -402,6 +695,39 @@ async function removeIfEmpty(dir: string, emptySubfolders: string[]): Promise<vo
   await rmdir(dir).catch(() => undefined);
 }
 
+type StoredMessage = { type: string; uuid: string; message: unknown; parent_tool_use_id?: string | null };
+
+/** The last stored entry of the turn that began with prompt `turnId`: where a fork that keeps it is cut. */
+function lastEntryOfTurn(messages: readonly StoredMessage[], turnId: string): string {
+  const start = messages.findIndex((message) => message.uuid === turnId);
+  if (start < 0) throw new AgentEngineError(`No turn ${turnId} on this thread.`);
+  let last = messages[start]!.uuid;
+  for (const message of messages.slice(start + 1)) {
+    if (isPrompt(message)) break;
+    last = message.uuid;
+  }
+  return last;
+}
+
+/** The permission mode for an access level and mode. */
+function permissionModeFor(access: Access | undefined, mode: ThreadMode | undefined): PermissionMode | undefined {
+  if (mode === "plan") return "plan";
+  switch (access) {
+    case "full":
+      return "bypassPermissions";
+    case "auto":
+      return "auto";
+    case "accept-edits":
+      return "acceptEdits";
+    case "ask":
+      return "default";
+    case "read-only":
+      return "dontAsk";
+    default:
+      return mode === "default" ? "default" : undefined;
+  }
+}
+
 /** One Claude session and the Claude Code process serving it. */
 class ClaudeThread implements Thread {
   readonly provider = "claude" as const;
@@ -417,6 +743,14 @@ class ClaudeThread implements Thread {
   private expectedModel?: string;
   private prompted: boolean;
   private closed = false;
+  private access?: Access;
+  private mode?: ThreadMode;
+  /** The output schema the running process was started with, as JSON; empty for none. */
+  private processSchema = "";
+  /** Where the next process resumes the session from, after a rewind. */
+  private resumeAt?: { at: string; dropsTurn?: string };
+  /** A seed still to put before the first message. */
+  private seedPending: boolean;
 
   constructor(
     private readonly engine: ClaudeEngine,
@@ -428,10 +762,19 @@ class ClaudeThread implements Thread {
     if (!isAbsolute(options.cwd)) throw new AgentEngineError("A thread needs an absolute cwd.");
     this.normalizer = new ClaudeNormalizer(id);
     this.prompted = resumed;
+    this.access = options.access;
+    this.mode = options.mode;
+    this.processSchema = options.outputSchema ? JSON.stringify(options.outputSchema) : "";
+    this.seedPending = !resumed && Boolean(options.seed?.turns.length);
   }
 
   get activeTurn(): Turn | undefined {
     return this.current && !this.current.done ? this.current : undefined;
+  }
+
+  /** @internal */
+  get isClosed(): boolean {
+    return this.closed;
   }
 
   /**
@@ -466,13 +809,30 @@ class ClaudeThread implements Thread {
     const turn = this.newTurn();
     void (async () => {
       try {
+        const schema = turnOptions.outputSchema === null ? undefined : (turnOptions.outputSchema ?? this.options.outputSchema);
+        const schemaKey = schema ? JSON.stringify(schema) : "";
+        const accessChanged = turnOptions.access !== undefined && turnOptions.access !== this.access;
+        const modeChanged = turnOptions.mode !== undefined && turnOptions.mode !== this.mode;
+        if (turnOptions.access !== undefined) this.access = turnOptions.access;
+        if (turnOptions.mode !== undefined) this.mode = turnOptions.mode;
+        // Both are launch settings: a new process on the same session picks them up.
+        const relaunch = accessChanged || schemaKey !== this.processSchema;
+        this.processSchema = schemaKey;
+        if (relaunch && this.query) await this.relaunch();
         const query = await this.ready();
+        if (modeChanged && !relaunch) {
+          const mode = permissionModeFor(this.access, this.mode) ?? "default";
+          await query.setPermissionMode(mode);
+        }
         if (turnOptions.model) await query.setModel(turnOptions.model);
         const flags: Record<string, unknown> = {};
         if (turnOptions.effort) flags.effortLevel = turnOptions.effort;
         if (turnOptions.fastMode !== undefined) flags.fastMode = turnOptions.fastMode;
         if (Object.keys(flags).length) await query.applyFlagSettings(flags as Parameters<Query["applyFlagSettings"]>[0]);
-        this.send(userMessage(input));
+        turn.expectsOutput = Boolean(schema);
+        const preamble = this.seedPending && this.options.seed ? seedPreamble(this.options.seed) : "";
+        this.seedPending = false;
+        this.send(userMessage(await claudeContent(prefixInput(input, preamble)), { uuid: turn.turnId! }));
       } catch (error) {
         this.failTurn(turn, error);
       }
@@ -483,8 +843,12 @@ class ClaudeThread implements Thread {
   compact(): Turn {
     if (this.activeTurn) throw new AgentEngineError("A turn is already running on this thread; compact after it ends.");
     const turn = this.newTurn();
-    void this.ready().then(() => this.send(userMessage("/compact")), (error) => this.failTurn(turn, error));
+    void this.ready().then(() => this.send(userMessage("/compact", { uuid: turn.turnId! })), (error) => this.failTurn(turn, error));
     return turn;
+  }
+
+  review(target: ReviewTarget): Turn {
+    return this.run(reviewPrompt(target));
   }
 
   subscribe(listener: (event: AgentEvent) => void): () => void {
@@ -520,6 +884,128 @@ class ClaudeThread implements Thread {
     }));
   }
 
+  /**
+   * Restores files first (they need the running process and the prompt's
+   * checkpoint), then starts a new process that resumes the session from the
+   * last entry before `beforeTurnId`.
+   */
+  async rewind(beforeTurnId: string, options: { files?: boolean } = {}): Promise<RewindResult> {
+    if (this.activeTurn) throw new AgentEngineError("A turn is running; rewind after it ends.");
+    if (options.files && !this.options.fileCheckpoints) {
+      throw new UnsupportedFeatureError("put files back on rewind", "Claude", "start the thread with fileCheckpoints: true");
+    }
+    const messages = await this.sdk.getSessionMessages(this.id, { dir: this.options.cwd, includeSystemMessages: true });
+    const index = messages.findIndex((message) => message.uuid === beforeTurnId);
+    if (index < 0 || !isPrompt(messages[index]!)) throw new AgentEngineError(`No turn ${beforeTurnId} on this thread.`);
+    const anchor = messages[index - 1]?.uuid;
+    if (!anchor) throw new AgentEngineError("There is nothing before the first turn to go back to; start a new thread instead.");
+    const later = messages.slice(index).filter(isPrompt);
+    let files: RewindResult["files"];
+    if (options.files) {
+      const result = await (await this.ready()).rewindFiles(beforeTurnId);
+      if (!result.canRewind) throw new AgentEngineError(`Claude could not put the files back: ${result.error ?? "no checkpoint for that turn"}.`);
+      files = {
+        method: "checkpoint",
+        paths: result.filesChanged ?? [],
+        ...(result.insertions !== undefined ? { insertions: result.insertions } : {}),
+        ...(result.deletions !== undefined ? { deletions: result.deletions } : {}),
+      };
+    }
+    // Claude checks the dropped range is one turn when told which; with several it is left unchecked.
+    this.resumeAt = { at: anchor, ...(later.length === 1 ? { dropsTurn: beforeTurnId } : {}) };
+    this.last = undefined;
+    await this.relaunch();
+    return { droppedTurns: later.length, ...(files ? { files } : {}) };
+  }
+
+  async history(): Promise<HistoryTurn[]> {
+    return claudeHistory(await this.sdk.getSessionMessages(this.id, { dir: this.options.cwd }));
+  }
+
+  async rename(title: string): Promise<void> {
+    await this.sdk.renameSession(this.id, title, { dir: this.options.cwd });
+    this.dispatch({ threadId: this.id, turnId: "", type: "thread.renamed", title });
+  }
+
+  async contextUsage(): Promise<ContextUsage> {
+    const usage = await (await this.ready()).getContextUsage();
+    return {
+      usedTokens: usage.totalTokens,
+      maxTokens: usage.maxTokens,
+      percent: usage.percentage,
+      categories: usage.categories.map((category) => ({ name: category.name, tokens: category.tokens, kind: category.kind })),
+    };
+  }
+
+  async setGoal(_objective: string): Promise<Goal> {
+    throw new UnsupportedFeatureError("keep a goal across turns", "Claude", "re-prompt from the app until the work is done");
+  }
+
+  async goal(): Promise<Goal | undefined> {
+    throw new UnsupportedFeatureError("keep a goal across turns", "Claude");
+  }
+
+  async clearGoal(): Promise<void> {
+    throw new UnsupportedFeatureError("keep a goal across turns", "Claude");
+  }
+
+  async shell(_command: string): Promise<void> {
+    throw new UnsupportedFeatureError("run a user shell command in a thread", "Claude", "ask the agent to run it, or run it in the app");
+  }
+
+  async tasks(): Promise<TaskInfo[]> {
+    return this.normalizer.runningTasks();
+  }
+
+  async stopTask(taskId: string): Promise<void> {
+    await (await this.ready()).stopTask(taskId);
+  }
+
+  async setMcpServers(servers: Record<string, McpServer>): Promise<McpChangeResult> {
+    const result = await (await this.ready()).setMcpServers(claudeMcpServers(servers));
+    return { added: result.added, removed: result.removed, errors: result.errors };
+  }
+
+  async reconnectMcp(server: string): Promise<void> {
+    await (await this.ready()).reconnectMcpServer(server);
+  }
+
+  async toggleMcp(server: string, enabled: boolean): Promise<void> {
+    await (await this.ready()).toggleMcpServer(server, enabled);
+  }
+
+  async mcpLogin(_server: string): Promise<{ url: string }> {
+    throw new UnsupportedFeatureError("start an MCP server's sign-in", "Claude", "a server that needs one asks through a url elicitation request");
+  }
+
+  async readMcpResource(server: string, uri: string): Promise<McpResourceContent[]> {
+    const response = await (await this.ready()).readMcpResource(server, uri);
+    return response.contents.map((content) => ({
+      uri: content.uri,
+      ...(content.mimeType ? { mimeType: content.mimeType } : {}),
+      ...(content.text !== undefined ? { text: content.text } : {}),
+      ...(content.blob !== undefined ? { blob: content.blob } : {}),
+    }));
+  }
+
+  async reloadSkills(): Promise<CommandInfo[]> {
+    const query = await this.ready();
+    await query.reloadSkills();
+    return claudeCommands({ commands: await query.supportedCommands() });
+  }
+
+  async reloadPlugins(): Promise<void> {
+    await (await this.ready()).reloadPlugins();
+  }
+
+  async export(): Promise<PortableTranscript> {
+    return { provider: "claude", threadId: this.id, turns: await this.history() };
+  }
+
+  async realtime(): Promise<RealtimeSession> {
+    throw new UnsupportedFeatureError("open a realtime voice session", "Claude");
+  }
+
   async close(): Promise<void> {
     if (this.closed) return;
     this.closed = true;
@@ -535,7 +1021,7 @@ class ClaudeThread implements Thread {
     const turn: TurnHandle = new TurnHandle(this.id, {
       steer: async (input) => {
         if (turn.done || this.current !== turn) throw new SteerRejectedError("The turn has ended; start a new one.");
-        this.send(userMessage(input, "next"));
+        this.send(userMessage(await claudeContent(input), { priority: "next" }));
       },
       interrupt: async () => {
         if (turn.done || this.current !== turn) return;
@@ -559,10 +1045,21 @@ class ClaudeThread implements Thread {
     return this.query!;
   }
 
+  /** Replaces the process with a new one on the same session, for settings Claude Code takes only at launch. */
+  private async relaunch(): Promise<void> {
+    const old = this.query;
+    this.query = undefined;
+    this.input?.end();
+    old?.close();
+    await this.open();
+  }
+
   private send(message: SDKUserMessage): void {
     if (!this.input) throw new RuntimeConnectionError("The Claude Code process has ended.");
     this.input.push(message);
     this.prompted = true;
+    // Once a prompt follows the rewind point, a plain resume carries on from it.
+    this.resumeAt = undefined;
   }
 
   /** Reads the process's messages until it ends. */
@@ -589,10 +1086,13 @@ class ClaudeThread implements Thread {
   private handle(message: SDKMessage): void {
     const m = message as Record<string, any>;
     if (m.type === "system" && m.subtype === "init") {
-      if (this.expectedModel && this.options.strictModel !== false && m.model !== this.expectedModel && m.model !== this.options.model && this.current && !this.current.done) {
+      const allowed = new Set([this.expectedModel, this.options.model, ...(this.options.fallbackModels ?? [])]);
+      if (this.expectedModel && this.options.strictModel !== false && !allowed.has(m.model) && this.current && !this.current.done) {
         this.failTurn(this.current, Object.assign(new AgentEngineError(`Claude Code selected ${m.model}; ${this.options.model} was requested.`), { kind: "model" }));
         void this.query?.interrupt().catch(() => undefined);
       }
+      const turn = this.current && !this.current.done ? this.current : undefined;
+      for (const event of this.normalizer.normalize(message, turn?.turnId ?? "")) this.dispatch(event);
       return;
     }
     // The agent can start a turn on its own, such as when a background subagent reports back.
@@ -602,7 +1102,8 @@ class ClaudeThread implements Thread {
     for (const event of this.normalizer.normalize(message, turn?.turnId ?? "")) {
       if (event.type === "text.done" && !event.agentId) this.lastText = event.text;
       this.dispatch(event);
-      if (event.type === "model.rerouted" && this.options.strictModel !== false && turn) {
+      const fallback = event.type === "model.rerouted" && (this.options.fallbackModels ?? []).includes(event.to);
+      if (event.type === "model.rerouted" && this.options.strictModel !== false && turn && !fallback) {
         this.failTurn(turn, Object.assign(new AgentEngineError(`Claude switched from ${event.from} to ${event.to}.`), { kind: "model" }));
         void this.query?.interrupt().catch(() => undefined);
       }
@@ -612,21 +1113,29 @@ class ClaudeThread implements Thread {
       if (typeof m.queued_turn_count === "number" && m.queued_turn_count > 0) return;
       const usage = claudeUsage(m.modelUsage);
       if (this.interruptRequested) this.finish(turn, { status: "interrupted", usage });
-      else if (m.subtype === "success" && !m.is_error) this.finish(turn, { status: "completed", text: String(m.result ?? this.lastText), usage });
-      else {
+      else if (m.subtype === "success" && !m.is_error) {
+        const text = String(m.result ?? this.lastText);
+        const output = m.structured_output !== undefined ? m.structured_output : turn.expectsOutput ? parseOutput(text) : undefined;
+        this.finish(turn, { status: "completed", text, usage, ...(output !== undefined ? { output } : {}) });
+      } else {
         const detail = m.subtype === "success" ? String(m.result ?? "") : (m.errors ?? []).filter(Boolean).join("; ") || m.subtype;
-        this.finish(turn, { status: "failed", usage, error: classifyClaudeError(detail, this.normalizer.assistantError, this.normalizer.lastLimit) });
+        // Running out of the thread's own turns or budget is a limit the app set, not a runtime failure.
+        const error = m.subtype === "error_max_turns" || m.subtype === "error_max_budget_usd"
+          ? { kind: "limit" as const, message: detail }
+          : classifyClaudeError(detail, this.normalizer.assistantError, this.normalizer.lastLimit);
+        this.finish(turn, { status: "failed", usage, error });
       }
     }
   }
 
-  private finish(turn: TurnHandle, outcome: { status: TurnResult["status"]; text?: string; usage?: ReturnType<typeof claudeUsage>; error?: TurnResult["error"] }): void {
+  private finish(turn: TurnHandle, outcome: { status: TurnResult["status"]; text?: string; output?: unknown; usage?: ReturnType<typeof claudeUsage>; error?: TurnResult["error"] }): void {
     if (turn.done) return;
     const base = { threadId: this.id, turnId: turn.turnId! };
     const usage = outcome.usage ? { usage: outcome.usage } : {};
+    const output = outcome.output !== undefined ? { output: outcome.output } : {};
     const event: AgentEvent = outcome.status === "failed"
       ? { ...base, type: "turn.failed", error: outcome.error ?? { kind: "other", message: "The Claude turn failed." }, ...usage }
-      : { ...base, type: "turn.completed", status: outcome.status, text: outcome.text ?? (outcome.status === "interrupted" ? this.lastText : ""), ...usage };
+      : { ...base, type: "turn.completed", status: outcome.status, text: outcome.text ?? (outcome.status === "interrupted" ? this.lastText : ""), ...output, ...usage };
     this.dispatch(event);
     this.cancelRequests();
     this.last = { turnId: base.turnId, status: outcome.status, text: event.type === "turn.completed" ? event.text : "" };
@@ -634,6 +1143,7 @@ class ClaudeThread implements Thread {
       ...base,
       status: outcome.status,
       text: event.type === "turn.completed" ? event.text : "",
+      ...output,
       ...usage,
       ...(outcome.error ? { error: outcome.error } : {}),
     });
@@ -669,39 +1179,55 @@ class ClaudeThread implements Thread {
   private sdkOptions(abortController: AbortController): Options {
     const { options } = this;
     const claude = options.claude ?? {};
-    const access: Partial<Options> =
-      options.access === "full" ? { permissionMode: "bypassPermissions", allowDangerouslySkipPermissions: true }
-      : options.access === "read-only" ? { permissionMode: "dontAsk", disallowedTools: WRITE_TOOLS }
-      : options.access === "ask" ? { permissionMode: "default" }
-      : {};
+    const access = this.access;
     const settings: Record<string, unknown> = {};
     if (options.fastMode !== undefined) settings.fastMode = options.fastMode;
-    const permissionMode = claude.permissionMode ?? access.permissionMode;
+    // An explicit Claude permission mode wins, except that plan mode is the thread's mode.
+    const permissionMode = this.mode === "plan" ? "plan" : (claude.permissionMode ?? permissionModeFor(access, this.mode));
+    const disallowed = [...(access === "read-only" ? WRITE_TOOLS : []), ...(claude.disallowedTools ?? [])];
+    const limits = options.limits ?? {};
+    const schema = this.processSchema ? JSON.parse(this.processSchema) as Record<string, unknown> : undefined;
+    const fresh = !this.prompted;
     return {
       cwd: options.cwd,
       env: this.engine.environment(options.env),
       abortController,
       includePartialMessages: true,
+      includeHookEvents: true,
       forwardSubagentText: claude.forwardSubagentText ?? true,
+      ...(options.progressSummaries ? { agentProgressSummaries: true } : {}),
       ...(options.model ? { model: options.model } : {}),
       ...(options.effort ? { effort: options.effort as Options["effort"] } : {}),
       systemPrompt: claude.systemPrompt ?? { type: "preset", preset: "claude_code", ...(options.instructions ? { append: options.instructions } : {}) },
-      ...access,
       ...(permissionMode ? { permissionMode } : {}),
-      ...(permissionMode === "bypassPermissions" ? { allowDangerouslySkipPermissions: true } : {}),
+      // Bypass needs the launch flag even while plan mode is on, so leaving plan mode can return to it.
+      ...(access === "full" || permissionMode === "bypassPermissions" ? { allowDangerouslySkipPermissions: true } : {}),
       ...(options.mcpServers ? { mcpServers: claudeMcpServers(options.mcpServers) } : {}),
       ...(Object.keys(settings).length ? { settings } : {}),
       ...(claude.settingSources ? { settingSources: claude.settingSources } : {}),
       ...(claude.tools ? { tools: claude.tools } : {}),
       ...(claude.allowedTools ? { allowedTools: claude.allowedTools } : {}),
-      ...(claude.disallowedTools || access.disallowedTools ? { disallowedTools: [...(access.disallowedTools ?? []), ...(claude.disallowedTools ?? [])] } : {}),
+      ...(disallowed.length ? { disallowedTools: disallowed } : {}),
       ...(claude.strictMcpConfig !== undefined ? { strictMcpConfig: claude.strictMcpConfig } : {}),
       ...(claude.skills !== undefined ? { skills: claude.skills } : {}),
+      ...(claude.hooks ? { hooks: claude.hooks as Options["hooks"] } : {}),
+      ...(claude.plugins ? { plugins: claude.plugins } : {}),
       ...((claude.executable ?? this.engine.options.executable) ? { pathToClaudeCodeExecutable: claude.executable ?? this.engine.options.executable } : {}),
+      ...(schema ? { outputFormat: { type: "json_schema", schema } } : {}),
+      ...(limits.maxTurns !== undefined ? { maxTurns: limits.maxTurns } : {}),
+      ...(limits.maxBudgetUsd !== undefined ? { maxBudgetUsd: limits.maxBudgetUsd } : {}),
+      ...(limits.tokenBudget !== undefined ? { taskBudget: { total: limits.tokenBudget } } : {}),
+      ...(options.agents ? { agents: Object.fromEntries(Object.entries(options.agents).map(([name, agent]) => [name, { description: agent.description, prompt: agent.prompt, ...(agent.model ? { model: agent.model } : {}), ...(agent.tools ? { tools: agent.tools } : {}) }])) } : {}),
+      ...(options.additionalDirectories?.length ? { additionalDirectories: options.additionalDirectories } : {}),
+      ...(options.fileCheckpoints ? { enableFileCheckpointing: true } : {}),
+      ...(options.fallbackModels?.length ? { fallbackModel: options.fallbackModels.join(",") } : {}),
+      ...(options.promptSuggestions ? { promptSuggestions: true } : {}),
+      ...(fresh && options.title ? { title: options.title } : {}),
       canUseTool: this.canUseTool,
       onElicitation: this.onElicitation,
       // A session exists once a prompt reached Claude; before that, a new process opens it fresh under the same ID.
       ...(this.prompted ? { resume: this.id } : { sessionId: this.id }),
+      ...(this.resumeAt ? { resumeSessionAt: this.resumeAt.at, ...(this.resumeAt.dropsTurn ? { resumeDropsTurn: this.resumeAt.dropsTurn } : {}) } : {}),
       ...(claude.extra ?? {}),
     } as Options;
   }
@@ -743,21 +1269,28 @@ class ClaudeThread implements Thread {
           },
         };
       } else {
-        const action = toolName === "Bash" ? "command" : ["Edit", "Write", "MultiEdit", "NotebookEdit"].includes(toolName) ? "file-change" : "tool";
+        const planning = toolName === "ExitPlanMode";
+        const action = planning ? "plan" : toolName === "Bash" ? "command" : ["Edit", "Write", "MultiEdit", "NotebookEdit"].includes(toolName) ? "file-change" : "tool";
         request = {
           kind: "approval",
           id,
           action,
-          title: context.title ?? `Use ${toolName}`,
+          title: planning ? "Approve the plan" : (context.title ?? `Use ${toolName}`),
           tool: toolName,
           input,
+          ...(planning && typeof input.plan === "string" ? { plan: input.plan } : {}),
           ...(typeof input.command === "string" ? { command: input.command } : {}),
           ...(context.decisionReason ? { reason: context.decisionReason } : {}),
           raw: { toolName, input, suggestions: context.suggestions },
           respond: async ({ decision, message }) => {
-            if (decision === "allow") settle({ behavior: "allow", updatedInput: input });
-            else if (decision === "allow-session") settle({ behavior: "allow", updatedInput: input, ...(context.suggestions ? { updatedPermissions: context.suggestions } : {}) });
-            else settle({ behavior: "deny", message: message ?? "The user declined this.", ...(decision === "cancel" ? { interrupt: true } : {}) });
+            if (decision === "allow" || decision === "allow-session") {
+              // An approved plan ends plan mode; the thread goes back to its access level's mode.
+              if (planning) this.mode = "default";
+              settle({ behavior: "allow", updatedInput: input, ...(decision === "allow-session" && context.suggestions ? { updatedPermissions: context.suggestions } : {}) });
+              if (planning) void this.query?.setPermissionMode(permissionModeFor(this.access, "default") ?? "default").catch(() => undefined);
+            } else {
+              settle({ behavior: "deny", message: message ?? (planning ? "Keep planning; the user has not approved the plan yet." : "The user declined this."), ...(decision === "cancel" ? { interrupt: true } : {}) });
+            }
           },
         };
       }

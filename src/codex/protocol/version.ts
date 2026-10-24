@@ -10,7 +10,7 @@
  */
 
 /** Codex CLI/app-server version used to generate the checked-in bindings; the oldest accepted. */
-export const CODEX_PROTOCOL_VERSION = "0.163.0";
+export const CODEX_PROTOCOL_VERSION = "0.164.0";
 
 /** Parsed `major.minor.patch[-prerelease]` version. */
 interface ParsedVersion {
