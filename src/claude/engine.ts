@@ -1194,7 +1194,7 @@ class ClaudeThread implements Thread {
       includePartialMessages: true,
       includeHookEvents: true,
       forwardSubagentText: claude.forwardSubagentText ?? true,
-      agentProgressSummaries: options.progressSummaries ?? true,
+      ...(options.progressSummaries ? { agentProgressSummaries: true } : {}),
       ...(options.model ? { model: options.model } : {}),
       ...(options.effort ? { effort: options.effort as Options["effort"] } : {}),
       systemPrompt: claude.systemPrompt ?? { type: "preset", preset: "claude_code", ...(options.instructions ? { append: options.instructions } : {}) },

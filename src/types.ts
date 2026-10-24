@@ -457,7 +457,10 @@ export interface ThreadOptions {
   fallbackModels?: string[];
   /** Ask the runtime for suggested next prompts after each turn (`prompt.suggestion` events; Claude). */
   promptSuggestions?: boolean;
-  /** One-line summaries of what running subagents are doing, on `task.progress` (Claude). Defaults to true. */
+  /**
+   * One-line summaries of what running subagents are doing, on `task.progress`
+   * (Claude). Each costs a small model call, so it is off unless asked for.
+   */
   progressSummaries?: boolean;
   /** Codex-only settings, passed through. */
   codex?: CodexThreadOptions;

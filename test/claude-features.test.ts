@@ -204,7 +204,7 @@ test("thread options: limits, agents, folders, fallbacks, suggestions, title and
     additionalDirectories: ["/data"],
     fallbackModels: ["claude-sonnet-5-5", "claude-haiku-5-5"],
     promptSuggestions: true,
-    progressSummaries: false,
+    progressSummaries: true,
     claude: { plugins: [{ type: "local", path: "/plugins/x" }], hooks: { PreToolUse: [] } },
   });
   const options = queries[0]!.options;
@@ -216,11 +216,19 @@ test("thread options: limits, agents, folders, fallbacks, suggestions, title and
   assert.deepEqual(options.additionalDirectories, ["/data"]);
   assert.equal(options.fallbackModel, "claude-sonnet-5-5,claude-haiku-5-5");
   assert.equal(options.promptSuggestions, true);
-  assert.equal(options.agentProgressSummaries, false);
+  assert.equal(options.agentProgressSummaries, true);
   assert.equal(options.includeHookEvents, true);
   assert.deepEqual(options.plugins, [{ type: "local", path: "/plugins/x" }]);
   assert.deepEqual(options.hooks, { PreToolUse: [] });
   assert.equal(options.env.CLAUDE_CONFIG_DIR, "/alt/claude");
+  await engine.close();
+});
+
+test("subagent progress summaries are off unless asked for", async () => {
+  const { sdk, queries } = fakeClaudeSdk();
+  const engine = new ClaudeEngine({ sdk });
+  await engine.startThread({ cwd: "/tmp" });
+  assert.equal(queries[0]!.options.agentProgressSummaries, undefined);
   await engine.close();
 });
 
