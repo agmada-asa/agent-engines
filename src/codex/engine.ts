@@ -13,6 +13,7 @@ import { homedir } from "node:os";
 import { isAbsolute, join } from "node:path";
 import {
   AgentEngineError,
+  ConversationRevertError,
   RuntimeAuthError,
   RuntimeCompatibilityError,
   RuntimeConnectionError,
@@ -1079,7 +1080,13 @@ class CodexThread implements Thread {
         files = { paths: reversed.paths, method: "edits", ...(reversed.skipped.length ? { skipped: reversed.skipped } : {}) };
       }
     }
-    await client.request("thread/revert", { threadId: this.id, beforeTurnId });
+    // Files go first: they matter most. When the conversation then fails to rewind, the error says the files were put back.
+    try {
+      await client.request("thread/revert", { threadId: this.id, beforeTurnId });
+    } catch (error) {
+      if (files) throw new ConversationRevertError(files, error);
+      throw error;
+    }
     await (await this.checkpointStore())?.forget(dropped.map((turn) => turn.id));
     return { droppedTurns: dropped.length, ...(files ? { files } : {}) };
   }

@@ -86,7 +86,7 @@ const opencode = createEngine("acp", ACP_AGENTS.opencode); // or { command: "my-
   - `realtime()` for a live voice or text session, and `close()`.
 - `Turn`: async-iterable `AgentEvent`s, plus `id`, `steer()`, `interrupt()` and `result` (never rejects).
 - `AgentEvent`: see below. Events from a subagent carry its `agentId`.
-- Errors: `AgentEngineError` and its subclasses (`RuntimeAuthError`, `RuntimeCompatibilityError`, `SteerRejectedError`, `UnsupportedFeatureError`…).
+- Errors: `AgentEngineError` and its subclasses (`RuntimeAuthError`, `RuntimeCompatibilityError`, `SteerRejectedError`, `UnsupportedFeatureError`, `ConversationRevertError`…).
 - Presets: `lockedDownThread()`, `lockedDownCodexLaunch()`, `minimalEnvironment()` for untrusted input.
 - Helpers: `renderTranscript()` and `seedPreamble()` for handoffs, `localFileSearch()` and `fuzzyScore()`, `unifiedDiff()`, `reviewPrompt()`.
 - Lower level: `CodexClient` and `AcpClient` (the JSON-RPC clients), `CodexNormalizer`, `ClaudeNormalizer`, `AcpNormalizer`, and the compatibility helpers in `compat.ts`.
@@ -215,6 +215,8 @@ Files come back in one of two ways, reported as `files.method`:
 
 - `checkpoint`: Claude's own file checkpoints (`fileCheckpoints: true`), or on Codex a git snapshot the engine takes before each turn when the thread has `fileCheckpoints` and its folder is in a git repository. The snapshot goes into git's object store through a temporary index, so branches, the index and the working tree are not touched, and its ID is kept under the repository's git folder. A rewind restores whatever changed in the thread's folder since then, including files a shell command wrote, and anyone else's edits there in the meantime. Untracked files over 10 MB are left out.
 - `edits` (Codex without a snapshot): the edits Codex recorded in the dropped turns are undone, newest first. Files a shell command wrote are left as they are, and a file whose text has changed since is listed in `files.skipped`.
+
+Files are put back before the conversation is rewound. If Codex then fails to drop the turns, `rewind` throws `ConversationRevertError`: its `files` says what was put back, and the turns are still in the conversation, so tell the agent in the next prompt.
 
 Codex itself only rewinds the conversation, and turns the agent starts on its own (a goal's follow-on turns) get no snapshot. Claude cannot rewind past its first turn (start a new thread instead). `listThreads({ cwd, search, limit })` lists threads newest first, including ones started outside this library; Codex leaves subagents out.
 

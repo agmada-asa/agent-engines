@@ -8,6 +8,7 @@ import { join } from "node:path";
 import { after, test } from "node:test";
 import { CheckpointStore, gitRepository, restoreTree, reverseChanges, reverseDiff, snapshotTree } from "../src/checkpoints.ts";
 import { CodexEngine } from "../src/codex/engine.ts";
+import { ConversationRevertError } from "../src/errors.ts";
 import { unifiedDiff, wholeFileDiff } from "../src/diff.ts";
 import { FakeAppServer, fakeSpawner, until } from "./fake-app-server.ts";
 
@@ -182,6 +183,31 @@ test("Codex rewind with files restores the snapshot taken before the turn", asyn
   assert.equal(await readFile(join(dir, "tracked.txt"), "utf8"), "one\ntwo\n");
   assert.equal(await exists(join(dir, "made.txt")), false);
   assert.equal((await CheckpointStore.open(dir, "t1"))!.get("turn-2"), undefined, "the dropped turn's snapshot is forgotten");
+  await engine.close();
+});
+
+test("Codex rewind puts the files back even when the conversation does not rewind, and the error says so", async () => {
+  const dir = await repository();
+  const turnRecord = (id: string) => ({ id, status: "completed", items: [] });
+  const { spawn } = fakeSpawner({
+    ...codexHandlers(() => [turnRecord("turn-1"), turnRecord("turn-2")]),
+    "thread/revert": () => {
+      throw new Error("revert refused");
+    },
+  });
+  const engine = new CodexEngine({ spawnProcess: spawn });
+  const thread = await engine.startThread({ cwd: dir, fileCheckpoints: true });
+  await thread.run("first").result;
+  await thread.run("second").result;
+  await writeFile(join(dir, "tracked.txt"), "rewritten\n");
+  const error = await thread.rewind("turn-2", { files: true }).then(() => undefined, (caught: unknown) => caught);
+  assert.ok(error instanceof ConversationRevertError, String(error));
+  assert.match(error.message, /files were put back, but the conversation was not rewound: .*revert refused/u);
+  assert.equal(error.files.method, "checkpoint");
+  assert.deepEqual(error.files.paths, [join(dir, "tracked.txt")]);
+  assert.equal(await readFile(join(dir, "tracked.txt"), "utf8"), "one\ntwo\n");
+  // The turns are still there, so their snapshots are kept.
+  assert.ok((await CheckpointStore.open(dir, "t1"))!.get("turn-2"));
   await engine.close();
 });
 

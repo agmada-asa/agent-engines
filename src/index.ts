@@ -67,6 +67,7 @@ export { CodexNormalizer, classifyCodexError, codexGoal, codexRequest } from "./
 export { ClaudeNormalizer, classifyClaudeError, claudeHistory, claudeUsage } from "./claude/normalize.ts";
 export {
   AgentEngineError,
+  ConversationRevertError,
   RuntimeAuthError,
   RuntimeCompatibilityError,
   RuntimeConnectionError,
