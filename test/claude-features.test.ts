@@ -255,6 +255,25 @@ test("a switch to a listed fallback model is not a silent swap", async () => {
   await engine.close();
 });
 
+test("with hook events turned off, SessionStart's hook messages are dropped too", async () => {
+  const { sdk, queries } = fakeClaudeSdk({
+    onUser: (_message, query) => {
+      query.emit({ type: "system", subtype: "hook_started", hook_id: "h1", hook_name: "SessionStart:startup", hook_event: "SessionStart" });
+      query.emit({ type: "system", subtype: "hook_response", hook_id: "h1", hook_name: "SessionStart:startup", hook_event: "SessionStart", output: "", stdout: "", stderr: "", outcome: "success" });
+      replyMessages("ok").forEach((message) => query.emit(message));
+    },
+  });
+  const engine = new ClaudeEngine({ sdk });
+  const thread = await engine.startThread({ cwd: "/tmp", claude: { extra: { includeHookEvents: false } } });
+  const events: AgentEvent[] = [];
+  thread.subscribe((event) => events.push(event));
+  const result = await thread.run("Go").result;
+  assert.equal(result.status, "completed");
+  assert.equal(queries[0]!.options.includeHookEvents, false);
+  assert.deepEqual(events.filter((event) => event.type.startsWith("hook.")), []);
+  await engine.close();
+});
+
 test("hooks, notices and prompt suggestions become events", async () => {
   const { sdk } = fakeClaudeSdk({
     onUser: (_message, query) => {
