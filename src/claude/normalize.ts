@@ -10,7 +10,7 @@
  * `task.*` events, and `task_progress` reports progress on either kind.
  */
 
-import type { ModelUsage, SDKMessage } from "@anthropic-ai/claude-agent-sdk";
+import { USAGE_LIMIT_ERROR_PREFIXES, type ModelUsage, type SDKMessage } from "@anthropic-ai/claude-agent-sdk";
 import type {
   AgentEvent,
   FileChange,
@@ -123,7 +123,7 @@ function resultText(content: unknown): string | undefined {
 }
 
 /** How Claude Code words a spent allowance: "Claude AI usage limit reached", "You've hit your limit", "5-hour limit reached ∙ resets 3pm". */
-const USAGE_LIMIT_TEXT = /usage limit|hit your (?:usage )?limit|\b(?:5-hour|five-hour|session|weekly|daily|opus|sonnet) limit (?:reached|hit)|limit will reset|out of (?:extra )?usage/iu;
+const USAGE_LIMIT_TEXT = /^(?:Claude AI usage limit reached|You (?:hit|reached) your (?:usage )?limit|(?:5-hour|five-hour|session|weekly|daily|opus|sonnet) limit (?:reached|hit))\b/iu;
 
 /**
  * Classifies a failed Claude turn from what the turn showed: the assistant
@@ -141,12 +141,13 @@ export function classifyClaudeError(message: string, assistantError: string | un
   if (/\b(?:ENOTFOUND|EAI_AGAIN|ECONNRESET|ECONNREFUSED|ECONNABORTED|ETIMEDOUT|ENETUNREACH|ENETDOWN|EHOSTUNREACH|EPIPE)\b|fetch failed|socket hang up|can'?t reach the api|check your internet|network (?:error|is unreachable)|connection (?:error|reset|refused|closed|lost|dropped)|stream (?:disconnected|closed|ended) before|error sending request|\btimed? ?out\b|\btimeout\b|repeated api errors|bad gateway|service unavailable|gateway time-?out|internal server error|\b(?:api error|status|http)\b\D{0,12}\b(?:500|502|503|504)\b/iu.test(text)) {
     return { kind: "connection", message: text };
   }
-  // The SDK's own signals first; the text only for Claude Code's known allowance phrasings,
-  // so an unrelated "rate limit reached" or "resets at" in an error doesn't park the thread.
-  if (limit?.status === "rejected" || assistantError === "rate_limit" || USAGE_LIMIT_TEXT.test(text)) {
+  const errorText = text.trim().replace(/^API Error:\s*/iu, "");
+  const usageText = USAGE_LIMIT_ERROR_PREFIXES.some((prefix) => errorText.startsWith(prefix) && !/^ rate[ _-]?limit\b/iu.test(errorText.slice(prefix.length)));
+  if (limit?.status === "rejected" || usageText || USAGE_LIMIT_TEXT.test(errorText)) {
     return { kind: "usage-limit", message: text, ...(resetsAt ? { resetsAt } : {}) };
   }
-  if (/\brate[ _-]?limit|\b429\b|too many requests/iu.test(text)) return { kind: "rate-limit", message: text };
+  // The SDK also uses rate_limit for transient 429s, including "not your usage limit".
+  if (assistantError === "rate_limit" || /\brate[ _-]?limit|\b429\b|too many requests/iu.test(text)) return { kind: "rate-limit", message: text };
   return { kind: "other", message: text };
 }
 

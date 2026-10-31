@@ -116,6 +116,8 @@ const opencode = createEngine("acp", ACP_AGENTS.opencode); // or { command: "my-
 
 Anything runtime-specific goes in `codex: {…}` (approval policy, approvals reviewer, sandbox, network (also reasserted with the sandbox and approval policy on every turn), `config` overrides, host-answered `dynamicTools`, ephemeral, `listMcpTools` to tell a new thread its MCP tool names so the model needn't search `ALL_TOOLS`) or `claude: {…}` (setting sources, built-in tools, allowed and disallowed tools, permission mode, skills, system prompt, host `hooks`, local `plugins`, and `extra` for any other SDK option).
 
+`codex.listMcpTools` defaults to false and runs on new and forked threads, not resumes. Servers with more than 60 tools, connector servers, and names that Codex must hash are shown by count for lookup in `ALL_TOOLS`. Empty or failed listings are skipped; a closed connection still fails startup.
+
 ### Events
 
 `turn.started`, `text.delta` / `text.done`, `reasoning.delta` / `reasoning.done`, `tool.started` / `tool.output.delta` / `tool.progress` / `tool.completed`, `file.changed`, `diff.updated`, `plan.updated`, `plan.proposal.delta` / `plan.proposal.done`, `status`, `task.started` / `task.progress` / `task.ended`, `subagent.started` / `subagent.ended`, `request` / `request.resolved`, `usage`, `rate-limit`, `compacted`, `model.rerouted`, `notice`, `hook.started` / `hook.completed`, `goal.updated`, `mcp.status`, `thread.renamed`, `prompt.suggestion`, `realtime.*`, `turn.completed`, `turn.failed`.
