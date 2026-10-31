@@ -494,6 +494,12 @@ export interface CodexThreadOptions {
   /** Not written to disk; cannot be resumed. */
   ephemeral?: boolean;
   /**
+   * Tell the model a new or forked thread's MCP tool names, as a developer
+   * message. Codex defers most MCP tools behind `ALL_TOOLS`, so a model otherwise
+   * searches for each tool before calling it.
+   */
+  listMcpTools?: boolean;
+  /**
    * Who answers approval requests. Set `user` to keep them coming to the host
    * even when the operator's config routes them to Codex's own reviewer.
    */

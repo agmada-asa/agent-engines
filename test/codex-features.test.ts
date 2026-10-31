@@ -6,10 +6,10 @@
 import assert from "node:assert/strict";
 import { readFile } from "node:fs/promises";
 import { test } from "node:test";
-import { CodexEngine } from "../src/codex/engine.ts";
+import { CodexEngine, mcpToolLines } from "../src/codex/engine.ts";
 import { UnsupportedFeatureError } from "../src/errors.ts";
 import type { AgentEvent, EngineEvent } from "../src/types.ts";
-import { FakeAppServer, fakeSpawner, until } from "./fake-app-server.ts";
+import { FakeAppServer, fakeSpawner, NO_REPLY, until } from "./fake-app-server.ts";
 
 const THREAD = "019a-thread";
 
@@ -406,6 +406,168 @@ test("thread options: title, seed, agents and extra folders reach Codex", async 
     { type: "message", role: "user", content: [{ type: "input_text", text: "Hi" }] },
     { type: "message", role: "assistant", content: [{ type: "output_text", text: "Hello" }] },
   ]);
+  await engine.close();
+});
+
+test("listMcpTools tells a new thread its MCP tools by name, and large servers by count", async () => {
+  const many = Object.fromEntries(Array.from({ length: 61 }, (_, i) => [`app.tool_${i}`, {}]));
+  const { spawn, children } = fakeSpawner(handlers({
+    "thread/inject_items": () => ({}),
+    "mcpServerStatus/list": () => ({ data: [
+      { name: "geo-data", tools: { search: {}, "render-map": {} }, runtimeStatus: "connected" },
+      { name: "idle", tools: {}, runtimeStatus: "connected" },
+      { name: "apps", tools: many, runtimeStatus: "connected" },
+    ], nextCursor: null }),
+  }));
+  const engine = new CodexEngine({ spawnProcess: spawn });
+  await engine.startThread({ cwd: "/work", codex: { listMcpTools: true } });
+  const server = children[0]!;
+  assert.equal(server.requests("mcpServerStatus/list")[0].threadId, THREAD);
+  const [item] = server.requests("thread/inject_items")[0].items;
+  assert.equal(item.role, "developer");
+  const text: string = item.content[0].text;
+  assert.match(text, /- "geo-data": mcp__geo_data__render_map, mcp__geo_data__search\n/u);
+  assert.match(text, /- "apps": 61 tools, named mcp__apps__<tool>/u);
+  assert.doesNotMatch(text, /idle/u);
+  await engine.startThread({ cwd: "/work" });
+  await engine.startThread({ cwd: "/work", codex: { listMcpTools: false } });
+  assert.equal(server.requests("thread/inject_items").length, 1, "off unless asked");
+  assert.equal(server.requests("mcpServerStatus/list").length, 1);
+  await engine.close();
+});
+
+test("MCP tool names escape punctuation and Unicode, with exactly 60 names still listed", () => {
+  const tools = Array.from({ length: 60 }, (_, i) => `tool_${i}`);
+  const [line] = mcpToolLines([{ name: "small", status: "connected", tools }]);
+  assert.equal(line!.match(/mcp__small__/gu)?.length, 60);
+  assert.doesNotMatch(line!, /60 tools/u);
+  assert.deepEqual(mcpToolLines([{ name: "geo-data", status: "unknown", tools: ["map.🗺", "a/b", "two words"] }]), [
+    '- "geo-data": mcp__geo_data__a_b, mcp__geo_data__map__, mcp__geo_data__two_words',
+  ]);
+  assert.deepEqual(mcpToolLines([{ name: "mcp__notes", status: "connected", tools: ["search"] }]), [
+    '- "mcp__notes": mcp__notes__search',
+  ]);
+});
+
+test("ambiguous MCP names use counts and unavailable servers are omitted", () => {
+  const lines = mcpToolLines([
+    { name: "a-b", status: "connected", tools: ["read"] },
+    { name: "a_b", status: "connected", tools: ["write"] },
+    { name: "collisions", status: "connected", tools: ["a-b", "a_b"] },
+    { name: "long", status: "connected", tools: ["x".repeat(129)] },
+    { name: "codex_apps", status: "connected", tools: ["connector.search"] },
+    { name: "nested", status: "connected", tools: ["name__read"] },
+    { name: "nested__name", status: "connected", tools: ["read"] },
+    { name: "quoted\"\nserver", status: "connected", tools: ["search"] },
+    { name: "failed", status: "failed", tools: ["stale"] },
+    { name: "disabled", status: "disabled", tools: ["stale"] },
+    { name: "auth", status: "authenticationRequired", tools: ["stale"] },
+    { name: "empty", status: "connected", tools: [] },
+  ]);
+  assert.equal(lines.length, 8);
+  for (const line of lines.slice(0, 7)) {
+    assert.match(line, /tools; filter ALL_TOOLS/u);
+    assert.doesNotMatch(line, /mcp__/u);
+  }
+  assert.equal(lines[7]!.split("\n").length, 1, "a server name cannot add lines to the developer message");
+  assert.ok(lines[7]!.startsWith('- "quoted\\"\\nserver":'));
+});
+
+test("listMcpTools paginates, skips failed discoveries and injects after seed messages", async () => {
+  const { spawn, children } = fakeSpawner(handlers({
+    "thread/inject_items": () => ({}),
+    "mcpServerStatus/list": (params) => params.cursor ? { data: [
+      { name: "notes", runtimeStatus: "connected", tools: { search: {} } },
+    ], nextCursor: null } : { data: [
+      { name: "failed", runtimeStatus: "failed", tools: {}, toolsError: "tools/list timed out" },
+      { name: "empty", runtimeStatus: "connected", tools: {} },
+    ], nextCursor: "page-2" },
+  }));
+  const engine = new CodexEngine({ spawnProcess: spawn });
+  await engine.startThread({
+    cwd: "/work",
+    seed: { provider: "claude", threadId: "seed", turns: [{ id: "1", status: "completed", entries: [{ kind: "message", role: "user", text: "Earlier question" }] }] },
+    codex: { listMcpTools: true },
+  });
+  const server = children[0]!;
+  assert.deepEqual(server.requests("mcpServerStatus/list"), [
+    { threadId: THREAD, detail: "toolsAndAuthOnly" },
+    { threadId: THREAD, detail: "toolsAndAuthOnly", cursor: "page-2" },
+  ]);
+  const injections = server.requests("thread/inject_items");
+  assert.equal(injections.length, 2);
+  assert.equal(injections[0].items[0].role, "user");
+  assert.match(injections[1].items[0].content[0].text, /mcp__notes__search/u);
+  assert.doesNotMatch(injections[1].items[0].content[0].text, /failed|empty/u);
+  await engine.close();
+});
+
+test("empty or failed MCP listings and rejected injections do not prevent a thread starting", async () => {
+  for (const listing of [
+    { data: [], nextCursor: null },
+    { data: [{ name: "failed", toolsError: "tools/list failed", tools: {} }], nextCursor: null },
+    new Error("MCP discovery failed"),
+    { data: [{ name: "notes", tools: { search: {} } }], nextCursor: null },
+  ]) {
+    const { spawn, children } = fakeSpawner(handlers({
+      "mcpServerStatus/list": () => listing,
+      "thread/inject_items": () => new Error("Injection unavailable"),
+    }));
+    const engine = new CodexEngine({ spawnProcess: spawn });
+    await engine.startThread({ cwd: "/work", codex: { listMcpTools: true } });
+    assert.equal(children[0]!.requests("thread/inject_items").length, listing instanceof Error || !Object.keys(listing.data[0]?.tools ?? {}).length ? 0 : 1);
+    await engine.close();
+  }
+});
+
+test("an MCP listing timeout fails startup when the transport closes", async () => {
+  const { spawn } = fakeSpawner(handlers({ "mcpServerStatus/list": () => NO_REPLY }));
+  const engine = new CodexEngine({ spawnProcess: spawn, requestTimeoutMs: 30 });
+  await assert.rejects(engine.startThread({ cwd: "/work", codex: { listMcpTools: true } }), /request timed out: mcpServerStatus\/list/u);
+  await engine.close();
+});
+
+test("listMcpTools runs for forks, but not resumes or reconnections", async () => {
+  const { spawn, children } = fakeSpawner(handlers({
+    "mcpServerStatus/list": () => ({ data: [{ name: "notes", tools: { search: {} } }], nextCursor: null }),
+    "thread/inject_items": () => ({}),
+  }));
+  const engine = new CodexEngine({ spawnProcess: spawn });
+  const options = { cwd: "/work", codex: { listMcpTools: true } };
+  const thread = await engine.startThread(options);
+  await engine.resumeThread(THREAD, options);
+  const fork = await engine.forkThread(THREAD, options);
+  const server = children[0]!;
+  assert.deepEqual(server.requests("mcpServerStatus/list").map((params) => params.threadId), [THREAD, fork.id]);
+  server.exit();
+  await until(() => server.exited);
+  await thread.history();
+  assert.equal(children[1]!.requests("thread/resume").length, 1);
+  assert.equal(children[1]!.requests("mcpServerStatus/list").length, 0);
+  await engine.close();
+});
+
+test("MCP developer context stays out of thread history and turn output", async () => {
+  let item: unknown;
+  const { spawn, children } = fakeSpawner(handlers({
+    "mcpServerStatus/list": () => ({ data: [{ name: "notes", tools: { search: {} } }], nextCursor: null }),
+    "thread/inject_items": (params) => { [item] = params.items; return {}; },
+    "thread/turns/list": () => ({ data: [{ id: "turn-1", status: "completed", items: [item,
+      { type: "agentMessage", id: "answer", text: "Done." },
+    ] }], nextCursor: null }),
+  }));
+  const engine = new CodexEngine({ spawnProcess: spawn });
+  const thread = await engine.startThread({ cwd: "/work", codex: { listMcpTools: true } });
+  assert.deepEqual((await thread.history())[0]!.entries, [{ kind: "message", role: "assistant", text: "Done." }]);
+  const events: AgentEvent[] = [];
+  thread.subscribe((event) => events.push(event));
+  const turn = thread.run("Work");
+  const server = children[0]!;
+  await until(() => server.requests("turn/start").length === 1);
+  server.notify("item/completed", { threadId: THREAD, turnId: await turn.id, item });
+  complete(server, await turn.id, "Done.");
+  assert.equal((await turn.result).text, "Done.");
+  assert.doesNotMatch(JSON.stringify(events), /mcp__notes__search/u);
   await engine.close();
 });
 

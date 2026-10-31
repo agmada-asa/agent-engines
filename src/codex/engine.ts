@@ -839,6 +839,33 @@ async function listMcpServers(client: CodexClient, threadId?: string): Promise<M
   return servers;
 }
 
+/** Servers this large (connector apps) are named with a count rather than listed tool by tool. */
+const MAX_LISTED_TOOLS = 60;
+
+/** One line per MCP server with tools, each tool as Codex names it: `mcp__<server>__<tool>`. */
+export function mcpToolLines(servers: McpServerState[]): string[] {
+  const name = (part: string) => part.replace(/[^A-Za-z0-9_]/gu, "_") || "_";
+  const namespace = (server: McpServerState) => name(server.name).startsWith("mcp__") ? name(server.name) : `mcp__${name(server.name)}`;
+  const available = servers.filter((server) => server.tools.length && (server.status === "connected" || server.status === "unknown"));
+  const counts = new Map<string, number>();
+  for (const server of available) for (const tool of server.tools) {
+    const callable = `${namespace(server)}__${name(tool)}`;
+    counts.set(callable, (counts.get(callable) ?? 0) + 1);
+  }
+  return available.map((server) => {
+    const prefix = `${namespace(server)}__`;
+    const tools = [...server.tools].sort().map((tool) => `${prefix}${name(tool)}`);
+    const label = JSON.stringify(server.name);
+    // Codex hashes colliding or overlong names; raw inventory cannot tell us those callable names.
+    if (server.name === "codex_apps" || available.some((other) => other !== server && namespace(other) === namespace(server)) || tools.some((tool) => tool.length > 128 || counts.get(tool)! > 1)) {
+      return `- ${label}: ${tools.length} tools; filter ALL_TOOLS for this server's callable names`;
+    }
+    return tools.length > MAX_LISTED_TOOLS
+      ? `- ${label}: ${tools.length} tools, named ${prefix}<tool>; filter ALL_TOOLS for these`
+      : `- ${label}: ${tools.join(", ")}`;
+  });
+}
+
 /** Availability from `account/read`. */
 function accountAvailability(response: GetAccountResponse | undefined, requireSubscription: boolean): Availability {
   const account = response?.account;
@@ -981,7 +1008,25 @@ class CodexThread implements Thread {
         const items = responsesItems(options.seed);
         if (items.length) await client.request("thread/inject_items", { threadId: this.id, items });
       }
+      if (options.codex?.listMcpTools) await this.injectMcpToolNames(client).catch((error: unknown) => {
+        if (client.isClosed) throw error;
+      });
     }
+  }
+
+  /**
+   * Tells the model the thread's MCP tools by name. Codex defers most of them
+   * behind `ALL_TOOLS`, so without this a model searches for a tool it was told
+   * to use before it can call it.
+   */
+  private async injectMcpToolNames(client: CodexClient): Promise<void> {
+    const lines = mcpToolLines(await listMcpServers(client, this.id));
+    if (!lines.length) return;
+    const text = [
+      "MCP tools for this thread. Call the listed names directly in `tools`; where only a count is shown, filter `ALL_TOOLS` to find the callable names:",
+      ...lines,
+    ].join("\n");
+    await client.request("thread/inject_items", { threadId: this.id, items: [{ type: "message", role: "developer", content: [{ type: "input_text", text }] }] });
   }
 
   run(input: TurnInput, turnOptions: TurnOptions = {}): Turn {

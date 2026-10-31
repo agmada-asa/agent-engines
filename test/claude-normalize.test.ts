@@ -120,6 +120,56 @@ test("classifyClaudeError", () => {
   assert.equal(classifyClaudeError("Prompt is too long", undefined, undefined).kind, "context-window");
   assert.equal(classifyClaudeError("API Error: 529 overloaded", "overloaded", undefined).kind, "rate-limit");
   assert.equal(classifyClaudeError("something", undefined, claudeRateLimit({ status: "allowed" })).kind, "other");
+  assert.equal(classifyClaudeError("5-hour limit reached ∙ resets 3pm", undefined, undefined).kind, "usage-limit");
+  assert.equal(classifyClaudeError("Weekly limit reached", undefined, undefined).kind, "usage-limit");
+});
+
+test("text that only mentions a limit or a reset is not a spent allowance", () => {
+  const allowed = claudeRateLimit({ status: "allowed" });
+  assert.equal(classifyClaudeError("GitHub API rate limit reached for user", undefined, allowed).kind, "rate-limit");
+  assert.equal(classifyClaudeError("API Error: 429 Too Many Requests", undefined, undefined).kind, "rate-limit");
+  assert.equal(classifyClaudeError("Recursion limit reached in parser", undefined, allowed).kind, "other");
+  assert.equal(classifyClaudeError("The cache resets at midnight; tool failed", undefined, undefined).kind, "other");
+});
+
+test("Claude's rate_limit code also covers transient 429s and capacity errors", () => {
+  const transient = "API Error: Server is temporarily limiting requests (not your usage limit) · Rate limited";
+  assert.equal(classifyClaudeError(transient, "rate_limit", undefined).kind, "rate-limit");
+  assert.equal(classifyClaudeError(transient, undefined, undefined).kind, "rate-limit");
+  assert.equal(classifyClaudeError("Request rejected (429)", "rate_limit", undefined).kind, "rate-limit");
+  assert.equal(classifyClaudeError("Opus is experiencing high load. Switch to Sonnet.", "rate_limit", undefined).kind, "rate-limit");
+  assert.equal(classifyClaudeError("Unknown provider message", "rate_limit", undefined).kind, "rate-limit");
+  assert.equal(classifyClaudeError("You've hit your rate limit", "rate_limit", undefined).kind, "rate-limit");
+  assert.equal(classifyClaudeError("You've reached your rate limit", undefined, undefined).kind, "rate-limit");
+  assert.equal(classifyClaudeError("Approaching your usage limit", undefined, undefined).kind, "other");
+});
+
+test("Claude's current allowance messages are usage limits even without the code", () => {
+  for (const text of [
+    "You've hit your weekly limit · resets Nov 1",
+    "You've reached your usage limit",
+    "You're out of usage credits",
+    "Your org is out of usage · contact your admin",
+    "Your seat type doesn't include usage credits",
+    "Your usage allocation has been disabled by your admin",
+    "You're out of extra usage",
+    "API Error: Claude AI usage limit reached",
+  ]) {
+    assert.equal(classifyClaudeError(text, undefined, undefined).kind, "usage-limit", text);
+  }
+});
+
+test("explicit Claude failures take precedence over an allowance report", () => {
+  const rejected = claudeRateLimit({ status: "rejected", resetsAt: 1800000000 });
+  for (const [text, code, kind] of [
+    ["Not logged in", "authentication_failed", "auth"],
+    ["Prompt is too long", undefined, "context-window"],
+    ["API Error: 529 overloaded", "overloaded", "rate-limit"],
+    ["fetch failed", undefined, "connection"],
+  ]) {
+    assert.deepEqual(classifyClaudeError(text!, code, rejected), { kind, message: text });
+  }
+  assert.equal(classifyClaudeError("API Error: 429 Too Many Requests", "rate_limit", rejected).kind, "usage-limit");
 });
 
 test("claudeUsage sums models and keeps the context window", () => {

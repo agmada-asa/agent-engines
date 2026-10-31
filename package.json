@@ -1,6 +1,6 @@
 {
   "name": "agent-engines",
-  "version": "0.4.1",
+  "version": "0.4.2",
   "description": "One multi-provider agent layer: Codex app-server and the Claude Agent SDK behind one thread, turn and event API.",
   "license": "MIT",
   "author": "Agmada Allen Asa",
