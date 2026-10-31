@@ -114,7 +114,7 @@ const opencode = createEngine("acp", ACP_AGENTS.opencode); // or { command: "my-
 
 `access` is one of `full`, `auto` (the runtime's own reviewer decides routine approvals), `accept-edits` (edits go ahead; on Codex the same as `ask`, since the workspace sandbox already allows them), `ask` and `read-only`. "Not supported" options throw `UnsupportedFeatureError` when set, rather than being dropped.
 
-Anything runtime-specific goes in `codex: {…}` (approval policy, approvals reviewer, sandbox, network (also reasserted with the sandbox and approval policy on every turn), `config` overrides, host-answered `dynamicTools`, ephemeral) or `claude: {…}` (setting sources, built-in tools, allowed and disallowed tools, permission mode, skills, system prompt, host `hooks`, local `plugins`, and `extra` for any other SDK option).
+Anything runtime-specific goes in `codex: {…}` (approval policy, approvals reviewer, sandbox, network (also reasserted with the sandbox and approval policy on every turn), `config` overrides, host-answered `dynamicTools`, ephemeral, `listMcpTools` to tell a new thread its MCP tool names so the model needn't search `ALL_TOOLS`) or `claude: {…}` (setting sources, built-in tools, allowed and disallowed tools, permission mode, skills, system prompt, host `hooks`, local `plugins`, and `extra` for any other SDK option).
 
 ### Events
 

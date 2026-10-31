@@ -120,6 +120,16 @@ test("classifyClaudeError", () => {
   assert.equal(classifyClaudeError("Prompt is too long", undefined, undefined).kind, "context-window");
   assert.equal(classifyClaudeError("API Error: 529 overloaded", "overloaded", undefined).kind, "rate-limit");
   assert.equal(classifyClaudeError("something", undefined, claudeRateLimit({ status: "allowed" })).kind, "other");
+  assert.equal(classifyClaudeError("5-hour limit reached ∙ resets 3pm", undefined, undefined).kind, "usage-limit");
+  assert.equal(classifyClaudeError("Weekly limit reached", undefined, undefined).kind, "usage-limit");
+});
+
+test("text that only mentions a limit or a reset is not a spent allowance", () => {
+  const allowed = claudeRateLimit({ status: "allowed" });
+  assert.equal(classifyClaudeError("GitHub API rate limit reached for user", undefined, allowed).kind, "rate-limit");
+  assert.equal(classifyClaudeError("API Error: 429 Too Many Requests", undefined, undefined).kind, "rate-limit");
+  assert.equal(classifyClaudeError("Recursion limit reached in parser", undefined, allowed).kind, "other");
+  assert.equal(classifyClaudeError("The cache resets at midnight; tool failed", undefined, undefined).kind, "other");
 });
 
 test("claudeUsage sums models and keeps the context window", () => {

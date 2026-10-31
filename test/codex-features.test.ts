@@ -409,6 +409,31 @@ test("thread options: title, seed, agents and extra folders reach Codex", async 
   await engine.close();
 });
 
+test("listMcpTools tells a new thread its MCP tools by name, and large servers by count", async () => {
+  const many = Object.fromEntries(Array.from({ length: 61 }, (_, i) => [`app.tool_${i}`, {}]));
+  const { spawn, children } = fakeSpawner(handlers({
+    "thread/inject_items": () => ({}),
+    "mcpServerStatus/list": () => ({ data: [
+      { name: "geo-data", tools: { search: {}, "render-map": {} }, runtimeStatus: "connected" },
+      { name: "idle", tools: {}, runtimeStatus: "connected" },
+      { name: "apps", tools: many, runtimeStatus: "connected" },
+    ], nextCursor: null }),
+  }));
+  const engine = new CodexEngine({ spawnProcess: spawn });
+  await engine.startThread({ cwd: "/work", codex: { listMcpTools: true } });
+  const server = children[0]!;
+  assert.equal(server.requests("mcpServerStatus/list")[0].threadId, THREAD);
+  const [item] = server.requests("thread/inject_items")[0].items;
+  assert.equal(item.role, "developer");
+  const text: string = item.content[0].text;
+  assert.match(text, /- geo-data: mcp__geo_data__render_map, mcp__geo_data__search\n/u);
+  assert.match(text, /- apps: 61 tools, named mcp__apps__<tool>/u);
+  assert.doesNotMatch(text, /idle/u);
+  await engine.startThread({ cwd: "/work" });
+  assert.equal(server.requests("thread/inject_items").length, 1, "off unless asked");
+  await engine.close();
+});
+
 test("turn limits are refused rather than ignored", async () => {
   const engine = new CodexEngine({ spawnProcess: fakeSpawner(handlers()).spawn });
   await assert.rejects(engine.startThread({ cwd: "/work", limits: { maxTurns: 3 } }), UnsupportedFeatureError);
