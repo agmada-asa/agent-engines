@@ -197,6 +197,19 @@ test("a pnpm global from pnpm 11: the script sits in <home>/bin and points up", 
   assert.equal(ran[0].env.PNPM_HOME, home);
 });
 
+test("a pnpm home under a symlinked folder keeps the spelling on PATH, because pnpm compares its store location as text", async () => {
+  const { host, ran, env } = fake({
+    path: "/tmp/pnpm",
+    executables: ["/tmp/pnpm/codex", "/tmp/pnpm/pnpm"],
+    links: { "/tmp/pnpm": "/private/tmp/pnpm", "/tmp/pnpm/codex": "/private/tmp/pnpm/codex" },
+    texts: { "/private/tmp/pnpm/codex": `#!/bin/sh\nexec node "$basedir/global/5/node_modules/@openai/codex/bin/codex.js" "$@"\n` },
+    version: "codex-cli 0.164.0",
+    install: (machine) => void (machine.version = "codex-cli 0.166.0"),
+  });
+  await updateRuntime("codex", { host, env });
+  assert.equal(ran[0].env.PNPM_HOME, "/tmp/pnpm");
+});
+
 test("a pnpm global reached directly, without its script", async () => {
   const home = "/home/me/.local/share/pnpm";
   const binary = `${home}/global/5/.pnpm/@openai+codex@0.164.0/node_modules/@openai/codex/bin/codex.js`;
