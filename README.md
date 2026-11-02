@@ -73,7 +73,7 @@ const opencode = createEngine("acp", ACP_AGENTS.opencode); // or { command: "my-
 
 - `createEngine(provider, options)`: a `CodexEngine`, `ClaudeEngine` or `AcpEngine`. Nothing starts until first use.
 - `Engine`:
-  - runtime: `availability()`, `capabilities()`, `models()`, `usage()`, `commands()`, `config()`, `prewarm()`, `subscribe()` for engine-wide events, `close()`.
+  - runtime: `availability()`, `capabilities()`, `runtimeVersion()`, `updateRuntime()`, `models()`, `usage()`, `commands()`, `config()`, `prewarm()`, `subscribe()` for engine-wide events, `close()`.
   - threads: `startThread()`, `resumeThread()`, `forkThread()`, `listThreads()`, `readThread()`, `renameThread()`, `archiveThread()`, `unarchiveThread()`, `deleteThread()`.
   - account: `login()`, `logout()`.
   - files and extensions: `searchFiles()`, `plugins()`, `installPlugin()`, `uninstallPlugin()`, `setSkillEnabled()`.
@@ -86,7 +86,7 @@ const opencode = createEngine("acp", ACP_AGENTS.opencode); // or { command: "my-
   - `realtime()` for a live voice or text session, and `close()`.
 - `Turn`: async-iterable `AgentEvent`s, plus `id`, `steer()`, `interrupt()` and `result` (never rejects).
 - `AgentEvent`: see below. Events from a subagent carry its `agentId`.
-- Errors: `AgentEngineError` and its subclasses (`RuntimeAuthError`, `RuntimeCompatibilityError`, `SteerRejectedError`, `UnsupportedFeatureError`, `ConversationRevertError`…).
+- Errors: `AgentEngineError` and its subclasses (`RuntimeAuthError`, `RuntimeCompatibilityError`, `RuntimeUpdateError`, `SteerRejectedError`, `UnsupportedFeatureError`, `ConversationRevertError`…).
 - Presets: `lockedDownThread()`, `lockedDownCodexLaunch()`, `minimalEnvironment()` for untrusted input.
 - Helpers: `renderTranscript()` and `seedPreamble()` for handoffs, `localFileSearch()` and `fuzzyScore()`, `unifiedDiff()`, `reviewPrompt()`.
 - Lower level: `CodexClient` and `AcpClient` (the JSON-RPC clients), `CodexNormalizer`, `ClaudeNormalizer`, `AcpNormalizer`, and the compatibility helpers in `compat.ts`.
@@ -293,6 +293,34 @@ Codex adds the earlier conversation to the thread's history; Claude and ACP agen
 - **Images** go by path or base64 to every runtime; Claude's are read and sent as base64.
 - **One ACP agent process per engine**, shared by its threads, like Codex.
 - With `access: "full"` the Claude SDK prints a `CLAUDE_SDK_CAN_USE_TOOL_SHADOWED` warning. It is harmless: AskUserQuestion still reaches `canUseTool` and surfaces as a `request` (covered by the live test).
+
+## Runtime versions and updates
+
+`engine.runtimeVersion()` says what is installed and what is published, without starting a turn or an app-server. `engine.updateRuntime()` moves it. When to check, whether to ask and when to restart are the app's to decide. Running threads keep the process they have, so an update reaches new ones only.
+
+```ts
+const status = await engine.runtimeVersion();
+// { version: "0.164.0", latest: "0.166.0", managedBy: "npm", updateOffered: true, ... }
+
+if (status.updateOffered) {
+  try {
+    const { from, to } = await engine.updateRuntime();
+    // Later, to go back, if the owner can pin: await engine.updateRuntime({ version: from });
+  } catch (error) {
+    if (error instanceof RuntimeUpdateError) show(error.reason, error.message, error.output);
+  }
+}
+```
+
+- **Who owns it** comes from where the binary really lives: `npm`, `pnpm` or `bun` for a global install, `homebrew` for a cask, `self` for Claude Code's native installer or Codex's standalone one, `bundled` for the copy in the Agent SDK, `unknown` for the rest. An update goes through that owner. An npm global is pinned with `--prefix`, because npm otherwise installs to the prefix of whichever node runs it; it uses the prefix's own npm, or any npm on `PATH` if the prefix has none.
+- **`updateOffered`** means a newer version, an installer to run and a version the engine would accept. A new Codex major comes back as not offered, with `reason`. `compatible` and `latestCompatible` apply the engine's own check, so Claude Code has a floor and no ceiling.
+- **A bundled Claude**, which is what runs without `executable`, reports the bundled version and what the latest SDK pairs with. Only a new release of the app can move it, so `canUpdate` is false.
+- **`latest`** is undefined when the lookup fails, which is a normal result. It comes from npm, from Homebrew for a cask (casks trail npm), and from the SDK's pairing for a bundled Claude. The lookup sends a fixed URL and nothing else.
+- **`{ version }`** goes to an exact version, for a rollback, when `canPinVersion` is true. Homebrew and `codex update` only go to their latest. The version must be strict semver and one the engine would accept.
+- **An update counts when the binary says so.** It re-reads the version and rechecks compatibility; a success returns `{ outcome, from, to, ... }`. Anything else throws `RuntimeUpdateError`, whose `reason` is `invalid-version`, `not-updatable`, `lookup-failed`, `incompatible-target` or `in-progress` before anything ran, and `installer-failed`, `version-mismatch` or `incompatible-result` after, with `from`, `to`, `exitCode` and `output`.
+- ACP agents report whether their command is there, and `updateRuntime()` throws `UnsupportedFeatureError`. On Windows, `canUpdate` is false.
+
+`runtimeVersion(provider, options)` and `updateRuntime(provider, options)` are also exported, for checking a runtime without an engine.
 
 ## Compatibility checks
 
