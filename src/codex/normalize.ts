@@ -101,6 +101,12 @@ export function classifyCodexError(error: Json | undefined | null, limits: reado
   }
 }
 
+/** A subagent's task name in words: `/root/check_the_docs` is "Check the docs". */
+function subagentName(path: unknown): string | undefined {
+  const words = typeof path === "string" ? (path.split("/").at(-1) ?? "").replace(/_+/g, " ").trim() : "";
+  return words ? words[0]!.toUpperCase() + words.slice(1) : undefined;
+}
+
 /** The text of an MCP tool result, joined. */
 function mcpOutput(item: Json): string | undefined {
   if (item.error) return typeof item.error.message === "string" ? item.error.message : JSON.stringify(item.error);
@@ -434,7 +440,7 @@ export class CodexNormalizer {
     if (item.type === "subAgentActivity" && item.kind === "started") {
       const id = String(item.agentThreadId);
       // This describes the original spawn, even if that child has already finished.
-      return this.subagents.has(id) ? [] : this.subagentStarted(base, id, { model: item.model });
+      return this.subagents.has(id) ? [] : this.subagentStarted(base, id, { description: subagentName(item.agentPath), model: item.model });
     }
     if (item.type === "agentMessage") {
       const phase = messagePhase(item.phase);
@@ -502,7 +508,7 @@ export class CodexNormalizer {
     return events;
   }
 
-  private subagentStarted(base: { threadId: string; turnId: string }, id: string, details: { prompt?: unknown; model?: unknown }): AgentEvent[] {
+  private subagentStarted(base: { threadId: string; turnId: string }, id: string, details: { description?: string; prompt?: unknown; model?: unknown }): AgentEvent[] {
     // The same start twice is dropped. A subagent that has ended and starts again was given more work.
     if (!id || (this.subagents.has(id) && !this.endedSubagents.delete(id))) return [];
     this.subagents.add(id);
@@ -511,6 +517,7 @@ export class CodexNormalizer {
       turnId: base.turnId,
       type: "subagent.started",
       subagentId: id,
+      ...(details.description ? { description: details.description } : {}),
       ...(typeof details.prompt === "string" ? { prompt: details.prompt } : {}),
       ...(typeof details.model === "string" ? { model: details.model } : {}),
     }];

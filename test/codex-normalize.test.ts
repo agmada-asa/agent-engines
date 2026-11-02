@@ -135,8 +135,8 @@ test("a spawn call that finishes after its subagent doesn't start it again", () 
 
 test("subAgentActivity starts and ends a subagent", () => {
   const n = normalizer();
-  const started = n.normalize("item/started", { threadId: T, turnId: "turn-1", item: { type: "subAgentActivity", id: "a1", kind: "started", agentThreadId: "child-2", agentPath: "/a", model: "gpt-6-luna", reasoningEffort: null } });
-  assert.deepEqual(started, [{ threadId: T, turnId: "turn-1", type: "subagent.started", subagentId: "child-2", model: "gpt-6-luna" }]);
+  const started = n.normalize("item/started", { threadId: T, turnId: "turn-1", item: { type: "subAgentActivity", id: "a1", kind: "started", agentThreadId: "child-2", agentPath: "/root/lead/check_the_docs", model: "gpt-6-luna", reasoningEffort: null } });
+  assert.deepEqual(started, [{ threadId: T, turnId: "turn-1", type: "subagent.started", subagentId: "child-2", description: "Check the docs", model: "gpt-6-luna" }]);
   const ended = n.normalize("item/completed", { threadId: T, turnId: "turn-1", item: { type: "subAgentActivity", id: "a2", kind: "interrupted", agentThreadId: "child-2", agentPath: "/a", model: null, reasoningEffort: null } });
   assert.equal((ended[0] as any).status, "stopped");
 });
