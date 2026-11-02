@@ -11,6 +11,7 @@ import { createHash } from "node:crypto";
 import { writeFile } from "node:fs/promises";
 import { homedir } from "node:os";
 import { isAbsolute, join } from "node:path";
+import { runtimeVersion, updateRuntime } from "../runtime-updates.ts";
 import {
   AgentEngineError,
   ConversationRevertError,
@@ -46,6 +47,10 @@ import type {
   McpResourceContent,
   McpServerState,
   ModelInfo,
+  RuntimeCheckOptions,
+  RuntimeUpdateOptions,
+  RuntimeUpdateResult,
+  RuntimeVersionStatus,
   PluginInfo,
   PortableTranscript,
   RealtimeOptions,
@@ -136,6 +141,7 @@ export const CODEX_CAPABILITIES: Capabilities = {
   listTasks: true,
   stopTask: true,
   mcp: { setServers: false, reconnect: true, toggle: false, login: true, readResource: true },
+  runtimeUpdate: true,
   login: true,
   logout: true,
   hookEvents: true,
@@ -424,6 +430,14 @@ export class CodexEngine implements Engine {
 
   async capabilities(): Promise<Capabilities> {
     return structuredClone(CODEX_CAPABILITIES);
+  }
+
+  runtimeVersion(options: RuntimeCheckOptions = {}): Promise<RuntimeVersionStatus> {
+    return runtimeVersion("codex", { ...options, executable: this.options.executable, env: this.options.env, minimumVersion: this.options.minimumVersion });
+  }
+
+  updateRuntime(options: RuntimeUpdateOptions = {}): Promise<RuntimeUpdateResult> {
+    return updateRuntime("codex", { ...options, executable: this.options.executable, env: this.options.env, minimumVersion: this.options.minimumVersion });
   }
 
   async models(): Promise<ModelInfo[]> {

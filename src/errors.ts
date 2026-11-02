@@ -18,6 +18,56 @@ export class RuntimeProtocolError extends AgentEngineError {}
 /** A serving runtime older than, or a different major from, what this library was built against. */
 export class RuntimeCompatibilityError extends AgentEngineError {}
 
+/**
+ * Why a runtime update did not finish. Before anything ran: `invalid-version`,
+ * `not-updatable`, `lookup-failed`, `incompatible-target`, `in-progress`. After
+ * the installer ran: `installer-failed`, `version-mismatch`, `incompatible-result`,
+ * and for Claude `sdk-check-failed`: the binary is in place, but the Agent SDK
+ * could not open a session on it or the session reported another version.
+ */
+export type RuntimeUpdateFailure =
+  | "invalid-version"
+  | "not-updatable"
+  | "lookup-failed"
+  | "incompatible-target"
+  | "in-progress"
+  | "installer-failed"
+  | "version-mismatch"
+  | "incompatible-result"
+  | "sdk-check-failed";
+
+/**
+ * A runtime update that did not finish. `from` is the version to roll back to,
+ * and `to` is what the binary reports now, read after the installer ran.
+ */
+export class RuntimeUpdateError extends AgentEngineError {
+  readonly from?: string;
+  readonly to?: string;
+  /** The version the update was aiming for. */
+  readonly target?: string;
+  /** The installer's exit code; null when it did not exit by itself. */
+  readonly exitCode?: number | null;
+  /** The end of what the installer printed. */
+  readonly output?: string;
+  /** The command that ran. */
+  readonly command?: readonly string[];
+
+  /** Creates the error with what is known so far. */
+  constructor(
+    readonly reason: RuntimeUpdateFailure,
+    message: string,
+    details: { from?: string; to?: string; target?: string; exitCode?: number | null; output?: string; command?: readonly string[] } = {},
+  ) {
+    super(message);
+    this.from = details.from;
+    this.to = details.to;
+    this.target = details.target;
+    this.exitCode = details.exitCode;
+    this.output = details.output;
+    this.command = details.command;
+  }
+}
+
 /** The runtime is not signed in, or is signed in a way the caller refused (an API key). */
 export class RuntimeAuthError extends AgentEngineError {}
 
