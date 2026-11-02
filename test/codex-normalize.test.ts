@@ -103,6 +103,29 @@ test("collab subagents: spawn, their own events tagged, and their end", () => {
   assert.deepEqual(n.subagentIds, ["child-1"]);
 });
 
+test("a subagent that ended and is sent more work starts and ends again", () => {
+  const n = normalizer();
+  const activity = (phase: "item/started" | "item/completed", kind: string) =>
+    n.normalize(phase, { threadId: T, turnId: "turn-1", item: { type: "subAgentActivity", id: `${kind}-${phase}`, kind, agentThreadId: "child-3", agentPath: "/a", model: null, reasoningEffort: null } }).filter((event) => event.type.startsWith("subagent."));
+  assert.equal(activity("item/started", "started").length, 1);
+  // Sent more while it runs: still the same round.
+  assert.deepEqual(activity("item/started", "interacted"), []);
+  assert.equal(activity("item/completed", "completed").length, 1);
+  assert.deepEqual(activity("item/started", "interacted").map((event) => event.type), ["subagent.started"]);
+  assert.deepEqual(activity("item/completed", "interacted"), []);
+  assert.deepEqual(activity("item/completed", "completed").map((event) => event.type), ["subagent.ended"]);
+  // Closing a finished one shows as interrupted, and isn't news.
+  assert.deepEqual(activity("item/completed", "interrupted"), []);
+});
+
+test("a spawn call that finishes after its subagent doesn't start it again", () => {
+  const n = normalizer();
+  const spawned = { type: "collabAgentToolCall", id: "s2", tool: "spawnAgent", status: "completed", senderThreadId: T, receiverThreadIds: ["child-4"], prompt: "Quick", model: null, reasoningEffort: null, agentsStates: {} };
+  n.normalize("item/started", { threadId: T, turnId: "turn-1", item: { type: "subAgentActivity", id: "a", kind: "started", agentThreadId: "child-4", agentPath: "/a", model: null, reasoningEffort: null } });
+  n.normalize("item/completed", { threadId: T, turnId: "turn-1", item: { type: "subAgentActivity", id: "b", kind: "completed", agentThreadId: "child-4", agentPath: "/a", model: null, reasoningEffort: null } });
+  assert.deepEqual(n.normalize("item/completed", { threadId: T, turnId: "turn-1", item: spawned }).map((event) => event.type), ["tool.completed"]);
+});
+
 test("subAgentActivity starts and ends a subagent", () => {
   const n = normalizer();
   const started = n.normalize("item/started", { threadId: T, turnId: "turn-1", item: { type: "subAgentActivity", id: "a1", kind: "started", agentThreadId: "child-2", agentPath: "/a", model: "gpt-6-luna", reasoningEffort: null } });

@@ -117,6 +117,20 @@ test("subagents: task events and their messages tagged with the task ID", () => 
   assert.deepEqual(n.subagentIds, ["agent-7"]);
 });
 
+test("subagents: one that ended and is sent more work starts and ends again", () => {
+  const n = new ClaudeNormalizer(S);
+  const start = { type: "system", subtype: "task_started", task_id: "agent-7", task_type: "local_agent", subagent_type: "general-purpose", description: "Look around" };
+  const end = { type: "system", subtype: "task_notification", task_id: "agent-7", status: "completed" };
+  assert.equal(n.normalize(msg({ ...start, tool_use_id: "agent-call", prompt: "Look" }), "t").length, 1);
+  // The same start again while it runs is not a second round.
+  assert.deepEqual(n.normalize(msg({ ...start, tool_use_id: "agent-call", prompt: "Look" }), "t"), []);
+  assert.deepEqual(n.normalize(msg({ ...end, summary: "one" }), "t"), [{ threadId: S, turnId: "t", type: "subagent.ended", subagentId: "agent-7", status: "completed", summary: "one" }]);
+  assert.deepEqual(n.normalize(msg({ ...end, summary: "one" }), "t"), []);
+  assert.deepEqual(n.normalize(msg({ ...start, tool_use_id: "send-call", prompt: "Now two" }), "t2"), [{ threadId: S, turnId: "t2", type: "subagent.started", subagentId: "agent-7", description: "Look around", prompt: "Now two" }]);
+  assert.deepEqual(n.normalize(msg({ ...end, summary: "two" }), "t2"), [{ threadId: S, turnId: "t2", type: "subagent.ended", subagentId: "agent-7", status: "completed", summary: "two" }]);
+  assert.deepEqual(n.subagentIds, ["agent-7"]);
+});
+
 test("compaction, rate limits and refusal fallbacks", () => {
   const n = new ClaudeNormalizer(S);
   assert.deepEqual(n.normalize(msg({ type: "system", subtype: "compact_boundary", compact_metadata: { trigger: "manual", pre_tokens: 9000, post_tokens: 1200 } }), "t"), [

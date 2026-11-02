@@ -430,7 +430,8 @@ export class CodexNormalizer {
   }
 
   private itemStarted(item: Json, base: { threadId: string; turnId: string; agentId?: string }): AgentEvent[] {
-    if (item.type === "subAgentActivity" && item.kind === "started") return this.subagentStarted(base, String(item.agentThreadId), { model: item.model });
+    // Sending a subagent more work shows as `interacted`, whatever state it was in.
+    if (item.type === "subAgentActivity" && (item.kind === "started" || item.kind === "interacted")) return this.subagentStarted(base, String(item.agentThreadId), { model: item.model });
     if (item.type === "agentMessage") {
       const phase = messagePhase(item.phase);
       if (phase) remember(this.phases, String(item.id), phase);
@@ -484,7 +485,8 @@ export class CodexNormalizer {
     const events: AgentEvent[] = [{ ...base, type: "tool.completed", itemId, tool, ...toolOutcome(item) }];
     if (item.type === "collabAgentToolCall") {
       if (item.tool === "spawnAgent") {
-        for (const id of item.receiverThreadIds ?? []) events.push(...this.subagentStarted(base, String(id), { prompt: item.prompt, model: item.model }));
+        // The spawn call can finish after a quick subagent has: that isn't it starting again.
+        for (const id of item.receiverThreadIds ?? []) if (!this.subagents.has(String(id))) events.push(...this.subagentStarted(base, String(id), { prompt: item.prompt, model: item.model }));
       }
       for (const [id, state] of Object.entries(record(item.agentsStates) ?? {})) {
         const status = record(state)?.status;
@@ -497,7 +499,8 @@ export class CodexNormalizer {
   }
 
   private subagentStarted(base: { threadId: string; turnId: string }, id: string, details: { prompt?: unknown; model?: unknown }): AgentEvent[] {
-    if (!id || this.subagents.has(id)) return [];
+    // The same start twice is dropped. A subagent that has ended and starts again was given more work.
+    if (!id || (this.subagents.has(id) && !this.endedSubagents.delete(id))) return [];
     this.subagents.add(id);
     return [{
       threadId: base.threadId,

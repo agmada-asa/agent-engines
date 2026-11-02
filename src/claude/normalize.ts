@@ -320,7 +320,8 @@ export class ClaudeNormalizer {
         // Shell and monitor tasks are tasks too; only agents are subagents.
         if (m.task_type && m.task_type !== "local_agent" && !m.subagent_type) return this.taskStarted(m, base, id);
         if (typeof m.tool_use_id === "string") this.taskByToolUse.set(m.tool_use_id, id);
-        if (this.subagents.has(id)) return [];
+        // The same start twice is dropped. A subagent that has ended and starts again was given more work.
+        if (this.subagents.has(id) && !this.endedSubagents.delete(id)) return [];
         this.subagents.add(id);
         this.taskInfo.set(id, { id, kind: "subagent", description: String(m.description ?? ""), status: "running" });
         return [{
