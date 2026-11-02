@@ -47,8 +47,13 @@ export interface RuntimeTarget {
   minimumVersion?: string;
 }
 
+/** How long a latest-version lookup may take. */
 const LOOKUP_TIMEOUT_MS = 5_000;
+
+/** How long `<binary> --version` may take. */
 const VERSION_TIMEOUT_MS = 10_000;
+
+/** How long an installer may run: a native Claude Code is a large download. */
 const UPDATE_TIMEOUT_MS = 5 * 60_000;
 
 /** How much of an installer's output is kept. */
@@ -82,8 +87,8 @@ const SPECS = {
     command: "claude",
     package: "@anthropic-ai/claude-code",
     casks: ["claude-code", "claude-code@latest"],
-    /** The native installer's versions folder, and the older `~/.claude/local` install. */
-    selfManaged: /\/claude\/versions\/|\/\.claude\/local\//u,
+    /** The native installer's versions folder. */
+    selfManaged: /\/claude\/versions\//u,
     /** Not `claude update`, which follows the user's release channel and would not reach the version reported. */
     selfCommand: (binary: string, version: string): readonly string[] => [binary, "install", version, "--force"],
     selfPins: true,
@@ -125,7 +130,10 @@ const REAL_HOST: RuntimeHost = {
     new Promise((done) => {
       execFile(command, [...args], { env: options.env as NodeJS.ProcessEnv, cwd: options.cwd, timeout: options.timeoutMs, maxBuffer: 64 * 1024 * 1024, windowsHide: true, encoding: "utf8" }, (error: ExecFileException | null, stdout, stderr) => {
         if (!error) return done({ exitCode: 0, stdout, stderr });
-        done({ exitCode: typeof error.code === "number" ? error.code : null, stdout, stderr, error: error.killed ? `it timed out after ${options.timeoutMs} ms` : error.message });
+        if (error.killed) return done({ exitCode: null, stdout, stderr, error: `it timed out after ${options.timeoutMs} ms` });
+        // A normal non-zero exit says what it has to say in stdout and stderr.
+        if (typeof error.code === "number") return done({ exitCode: error.code, stdout, stderr });
+        done({ exitCode: null, stdout, stderr, error: error.message });
       });
     }),
   fetch: (url, init) => fetch(url, init),
@@ -369,18 +377,25 @@ async function detectOwner(provider: ManagedProvider, binary: string, path: stri
     return { managedBy: "bundled", lookup: (timeoutMs) => sdkLatest(timeoutMs, host), blocked: `This ${spec.name} is the copy inside the Claude Agent SDK. Moving it takes a new app release with a newer SDK.` };
   }
 
-  const bun = path.indexOf(`/install/global/node_modules/${spec.package}/`);
-  if (bun > 0) return bunOwner(spec, path.slice(0, bun), npmLookup, env, host);
+  // The binary can live in the package or in its platform package: bun links the latter straight into its bin folder.
+  const inPackage = `node_modules/${spec.package}(?:-(?:darwin|linux|win32)-[a-z0-9-]+)?/`;
+  const bun = path.match(new RegExp(`^(.+?)/install/global/${inPackage}`, "u"));
+  if (bun) return bunOwner(spec, bun[1], npmLookup, env, host);
 
-  const npm = path.indexOf(`/lib/node_modules/${spec.package}/`);
-  if (npm >= 0) return npmOwner(spec, path.slice(0, npm) || "/", npmLookup, env, host);
+  const npm = path.match(new RegExp(`^(.*?)/lib/${inPackage}`, "u"));
+  if (npm) return npmOwner(spec, npm[1] || "/", npmLookup, env, host);
 
   // pnpm's bin entries are scripts, not symlinks, so the path may stop at the script. Its text names the target.
-  const pnpmTarget = new RegExp(`/global/[^/\\s"']+/(?:[^\\s"']*/)?node_modules/${spec.package}/`, "u");
+  const pnpmTarget = new RegExp(`/global/[^/\\s"']+/(?:[^\\s"']*/)?${inPackage}`, "u");
   const direct = path.match(pnpmTarget);
   if (direct) return pnpmOwner(spec, path.slice(0, direct.index), npmLookup, env, host);
   const shim = await host.readText(path);
-  if (shim && pnpmTarget.test(shim)) return pnpmOwner(spec, shim.includes("/../global/") ? dirname(dirname(path)) : dirname(path), npmLookup, env, host);
+  if (shim && pnpmTarget.test(shim)) {
+    // Spelled as on PATH when only a parent folder is a symlink: pnpm compares its store location as text.
+    const folder = (await host.realpath(dirname(binary)).catch(() => undefined)) === dirname(path) ? dirname(binary) : dirname(path);
+    // From pnpm 11 the script sits in `<home>/bin` and points up at `../global`.
+    return pnpmOwner(spec, shim.includes("/../global/") ? dirname(folder) : folder, npmLookup, env, host);
+  }
 
   if (spec.selfManaged.test(path)) {
     return {
@@ -511,7 +526,8 @@ export async function updateRuntime(provider: ManagedProvider, options: RuntimeT
   const { installer } = owner;
   if (!installer || !binary) throw new RuntimeUpdateError("not-updatable", owner.blocked ?? `${spec.name} cannot be updated here.`, { from, target: requested });
   if (requested && !installer.canPin) {
-    throw new RuntimeUpdateError("not-updatable", `${owner.managedBy === "homebrew" ? "Homebrew" : spec.name} can only move ${spec.name} to its latest version, not to ${requested}.`, { from, target: requested });
+    const updater = owner.managedBy === "homebrew" ? "Homebrew" : `${spec.name}'s own updater`;
+    throw new RuntimeUpdateError("not-updatable", `${updater} can only move ${spec.name} to its latest version, not to ${requested}.`, { from, target: requested });
   }
 
   const target = requested ?? (await owner.lookup(options.lookupTimeoutMs ?? LOOKUP_TIMEOUT_MS)).latest;

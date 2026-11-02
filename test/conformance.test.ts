@@ -67,6 +67,8 @@ const probes: Probe[] = [
   { name: "mcp.toggle", claimed: (c) => c.mcp.toggle, use: (_engine, thread) => thread.toggleMcp("x", false) },
   { name: "mcp.login", claimed: (c) => c.mcp.login, use: (_engine, thread) => thread.mcpLogin("x") },
   { name: "mcp.readResource", claimed: (c) => c.mcp.readResource, use: (_engine, thread) => thread.readMcpResource("x", "x://1") },
+  // A bad version stops it before anything runs, so this can never touch a real install.
+  { name: "runtimeUpdate", claimed: (c) => c.runtimeUpdate, use: (engine) => engine.updateRuntime({ version: "not-a-version" }) },
   { name: "login", claimed: (c) => c.login, use: (engine) => engine.login() },
   { name: "logout", claimed: (c) => c.logout, use: (engine) => engine.logout() },
   { name: "limits", claimed: (c) => c.limits.length > 0, use: (engine) => engine.startThread({ cwd: CWD, limits: { maxTurns: 1 } }) },
