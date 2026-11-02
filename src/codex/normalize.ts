@@ -301,7 +301,8 @@ export class CodexNormalizer {
 
     switch (method) {
       case "turn/started": {
-        if (agentId) return [];
+        // A message can be queued without waking an idle child. Its own turn is the start signal.
+        if (agentId) return this.subagentStarted(base(), agentId, {});
         const turnId = String(record(p.turn)?.id ?? "");
         this.currentTurnId = turnId;
         return [{ ...base(turnId), type: "turn.started" }];
@@ -430,8 +431,11 @@ export class CodexNormalizer {
   }
 
   private itemStarted(item: Json, base: { threadId: string; turnId: string; agentId?: string }): AgentEvent[] {
-    // Sending a subagent more work shows as `interacted`, whatever state it was in.
-    if (item.type === "subAgentActivity" && (item.kind === "started" || item.kind === "interacted")) return this.subagentStarted(base, String(item.agentThreadId), { model: item.model });
+    if (item.type === "subAgentActivity" && item.kind === "started") {
+      const id = String(item.agentThreadId);
+      // This describes the original spawn, even if that child has already finished.
+      return this.subagents.has(id) ? [] : this.subagentStarted(base, id, { model: item.model });
+    }
     if (item.type === "agentMessage") {
       const phase = messagePhase(item.phase);
       if (phase) remember(this.phases, String(item.id), phase);

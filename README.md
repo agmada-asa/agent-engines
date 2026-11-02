@@ -159,7 +159,7 @@ Limits worth knowing:
 - Claude reports `idle` and `waiting` only through session-state events, which the SDK sends when a session opts in. The engine does not opt in, so from Claude expect `working`, `compacting` and `retrying`; a pending `request` is the sign it is waiting.
 - `retrying` means the runtime will try the model request again; the turn has not failed.
 - `model.confirmed` is Claude only: the model that actually answered, read from the agent's own messages, with `agentId` set for a subagent. `subagent.started` has no `model` from Claude, because the SDK doesn't report one when a subagent starts. Codex's `model` there is what the runtime reports at the start, not a confirmation from the subagent's messages.
-- A subagent that has ended and is sent more work reports `subagent.started` again with the same `subagentId`, then its own `subagent.ended`. From Claude, `prompt` on that second start is the new message.
+- When a finished subagent begins another turn, it reports `subagent.started` again with the same `subagentId`, then its own `subagent.ended`. Queuing a Codex message without waking the subagent does not start it. From Claude, `prompt` on that second start is the new message; older run IDs cannot change the current run.
 - A task a subagent launched carries that subagent's `agentId`. `task.ended` needs the `task.started` from the same thread handle, so a task begun before a resume does not end on the new handle.
 
 Codex marks each agent message's `phase` on `text.delta` and `text.done`: `commentary` for a progress note between tool calls, `answer` for the reply. Claude's text events have no phase. A turn's result text is never a progress note.

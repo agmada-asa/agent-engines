@@ -111,9 +111,15 @@ test("a subagent that ended and is sent more work starts and ends again", () => 
   // Sent more while it runs: still the same round.
   assert.deepEqual(activity("item/started", "interacted"), []);
   assert.equal(activity("item/completed", "completed").length, 1);
-  assert.deepEqual(activity("item/started", "interacted").map((event) => event.type), ["subagent.started"]);
+  // A queued message also reports interacted, but does not wake an idle agent.
+  assert.deepEqual(activity("item/started", "interacted"), []);
+  assert.deepEqual(n.normalize("turn/started", { threadId: "child-3", turn: { id: "child-turn-2" } }), [
+    { threadId: T, turnId: "turn-1", type: "subagent.started", subagentId: "child-3" },
+  ]);
   assert.deepEqual(activity("item/completed", "interacted"), []);
   assert.deepEqual(activity("item/completed", "completed").map((event) => event.type), ["subagent.ended"]);
+  // The follow-up's activity can arrive after a very short child turn finishes.
+  assert.deepEqual(activity("item/started", "interacted"), []);
   // Closing a finished one shows as interrupted, and isn't news.
   assert.deepEqual(activity("item/completed", "interrupted"), []);
 });
@@ -124,6 +130,7 @@ test("a spawn call that finishes after its subagent doesn't start it again", () 
   n.normalize("item/started", { threadId: T, turnId: "turn-1", item: { type: "subAgentActivity", id: "a", kind: "started", agentThreadId: "child-4", agentPath: "/a", model: null, reasoningEffort: null } });
   n.normalize("item/completed", { threadId: T, turnId: "turn-1", item: { type: "subAgentActivity", id: "b", kind: "completed", agentThreadId: "child-4", agentPath: "/a", model: null, reasoningEffort: null } });
   assert.deepEqual(n.normalize("item/completed", { threadId: T, turnId: "turn-1", item: spawned }).map((event) => event.type), ["tool.completed"]);
+  assert.deepEqual(n.normalize("item/started", { threadId: T, turnId: "turn-1", item: { type: "subAgentActivity", id: "a", kind: "started", agentThreadId: "child-4", agentPath: "/a", model: null, reasoningEffort: null } }), []);
 });
 
 test("subAgentActivity starts and ends a subagent", () => {

@@ -131,6 +131,32 @@ test("subagents: one that ended and is sent more work starts and ends again", ()
   assert.deepEqual(n.subagentIds, ["agent-7"]);
 });
 
+test("subagents: late frames from an earlier run cannot restart or finish the current run", () => {
+  const n = new ClaudeNormalizer(S);
+  const start = { type: "system", subtype: "task_started", task_id: "agent-7", task_type: "local_agent", description: "Look" };
+  const end = { type: "system", subtype: "task_notification", task_id: "agent-7", status: "completed" };
+  n.normalize(msg({ ...start, run_id: "001" }), "t");
+  n.normalize(msg({ ...end, run_id: "001" }), "t");
+  assert.deepEqual(n.normalize(msg({ ...start, run_id: "001" }), "t"), []);
+  assert.equal(n.normalize(msg({ ...start, run_id: "002", prompt: "More" }), "t2")[0]?.type, "subagent.started");
+  assert.deepEqual(n.normalize(msg({ ...end, run_id: "001" }), "t2"), []);
+  assert.deepEqual(n.normalize(msg({ type: "system", subtype: "task_updated", task_id: "agent-7", run_id: "001", patch: { status: "completed" } }), "t2"), []);
+  assert.deepEqual(n.normalize(msg({ type: "system", subtype: "task_progress", task_id: "agent-7", run_id: "001", description: "Old progress" }), "t2"), []);
+  assert.equal(n.runningTasks()[0]?.status, "running");
+  assert.equal(n.normalize(msg({ ...end, run_id: "002" }), "t2")[0]?.type, "subagent.ended");
+  assert.deepEqual(n.normalize(msg({ ...start, run_id: "001" }), "t2"), []);
+  assert.deepEqual(n.normalize(msg({ ...start, run_id: "002" }), "t2"), []);
+});
+
+test("subagents: a new run starts even when the earlier end was not observed", () => {
+  const n = new ClaudeNormalizer(S);
+  const start = { type: "system", subtype: "task_started", task_id: "agent-7", task_type: "local_agent", description: "Look" };
+  n.normalize(msg({ ...start, run_id: "001" }), "t");
+  assert.equal(n.normalize(msg({ ...start, run_id: "002" }), "t2")[0]?.type, "subagent.started");
+  assert.deepEqual(n.normalize(msg({ type: "system", subtype: "task_notification", task_id: "agent-7", run_id: "001", status: "completed" }), "t2"), []);
+  assert.equal(n.runningTasks()[0]?.status, "running");
+});
+
 test("compaction, rate limits and refusal fallbacks", () => {
   const n = new ClaudeNormalizer(S);
   assert.deepEqual(n.normalize(msg({ type: "system", subtype: "compact_boundary", compact_metadata: { trigger: "manual", pre_tokens: 9000, post_tokens: 1200 } }), "t"), [
