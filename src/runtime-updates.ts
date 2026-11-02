@@ -119,13 +119,29 @@ function isStrictSemver(version: string): boolean {
   return STRICT_SEMVER.test(version);
 }
 
-/** Whether `candidate` is a later release than `current`. A release beats its own prereleases. */
+/** Whether `candidate` is a later semver release, including prerelease precedence. */
 function isNewer(candidate: string, current: string): boolean {
   const next = parseRuntimeVersion(candidate);
   const now = parseRuntimeVersion(current);
   if (!next || !now) return false;
   const order = compareVersions(next, now);
-  return order > 0 || (order === 0 && current.includes("-") && !candidate.includes("-"));
+  if (order !== 0) return order > 0;
+  const prerelease = (version: string) => version.includes("-") ? version.slice(version.indexOf("-") + 1).split(".") : [];
+  const left = prerelease(candidate);
+  const right = prerelease(current);
+  if (!left.length || !right.length) return Boolean(right.length && !left.length);
+  for (let index = 0; index < Math.max(left.length, right.length); index++) {
+    const a = left[index];
+    const b = right[index];
+    if (a === undefined || b === undefined) return a !== undefined;
+    if (a === b) continue;
+    const aNumeric = /^\d+$/u.test(a);
+    const bNumeric = /^\d+$/u.test(b);
+    if (aNumeric !== bNumeric) return !aNumeric;
+    // Compare numeric identifiers without losing precision on long digit strings.
+    return aNumeric && a.length !== b.length ? a.length > b.length : a > b;
+  }
+  return false;
 }
 
 /** Why the engine would refuse to run `version`, in the same terms as the check it runs. */
@@ -311,6 +327,8 @@ interface Command {
 
 /** How to move a runtime. `version` is passed only when `canPin` is true. */
 interface Installer {
+  /** Stable install location, shared by aliases and versioned binaries. */
+  location: string;
   canPin: boolean;
   command(version: string): Command;
 }
@@ -353,6 +371,7 @@ async function npmOwner(spec: Spec, prefix: string, lookup: Owner["lookup"], env
     managedBy: "npm",
     lookup,
     installer: {
+      location: prefix,
       canPin: true,
       command: (version) => ({
         argv: [npm, "install", "--global", "--prefix", prefix, "--no-fund", "--no-audit", "--no-update-notifier", ...(spec.installScript ? [`--allow-scripts=${spec.package}`] : []), `${spec.package}@${version}`],
@@ -363,16 +382,17 @@ async function npmOwner(spec: Spec, prefix: string, lookup: Owner["lookup"], env
 }
 
 /** A global install under `PNPM_HOME`. pnpm refuses to run unless its bin folder is on PATH; that folder is `bin` from pnpm 11 and the home itself before. */
-async function pnpmOwner(spec: Spec, home: string, lookup: Owner["lookup"], env: Env, host: RuntimeHost): Promise<Owner> {
+async function pnpmOwner(spec: Spec, home: string, bin: string, lookup: Owner["lookup"], env: Env, host: RuntimeHost): Promise<Owner> {
   const pnpm = await ownTool("pnpm", [join(home, "bin", "pnpm"), join(home, "pnpm")], env, host);
   if (!pnpm) return { managedBy: "pnpm", lookup, blocked: `${spec.name} is a pnpm global under ${home}, but pnpm was not found to update it.` };
   return {
     managedBy: "pnpm",
     lookup,
     installer: {
+      location: home,
       canPin: true,
       command: (version) => ({
-        argv: [pnpm, "add", "--global", ...(spec.installScript ? [`--allow-build=${spec.package}`] : []), `${spec.package}@${version}`],
+        argv: [pnpm, "add", "--global", "--global-dir", join(home, "global"), "--global-bin-dir", bin, ...(spec.installScript ? [`--allow-build=${spec.package}`] : []), `${spec.package}@${version}`],
         env: { ...withPath(env, join(home, "bin"), home), PNPM_HOME: home },
       }),
     },
@@ -387,10 +407,11 @@ async function bunOwner(spec: Spec, root: string, lookup: Owner["lookup"], env: 
     managedBy: "bun",
     lookup,
     installer: {
+      location: root,
       canPin: true,
       command: (version) => ({
         argv: [bun, "add", "--global", ...(spec.installScript ? ["--trust"] : []), `${spec.package}@${version}`],
-        env: { ...withPath(env, join(root, "bin")), BUN_INSTALL: root },
+        env: { ...withPath(env, join(root, "bin")), BUN_INSTALL: root, BUN_INSTALL_GLOBAL_DIR: join(root, "install", "global"), BUN_INSTALL_BIN: join(root, "bin") },
       }),
     },
   };
@@ -407,7 +428,7 @@ async function homebrewOwner(spec: Spec, root: string, room: string, name: strin
   return {
     managedBy: "homebrew",
     lookup,
-    installer: { canPin: false, command: () => ({ argv: [brew, "upgrade", "--cask", name], env: withPath(env, join(root, "bin")) }) },
+    installer: { location: join(root, "Caskroom", name), canPin: false, command: () => ({ argv: [brew, "upgrade", "--cask", name], env: withPath(env, join(root, "bin")) }) },
   };
 }
 
@@ -434,22 +455,27 @@ async function detectOwner(provider: ManagedProvider, binary: string, path: stri
   if (npm) return npmOwner(spec, npm[1] || "/", npmLookup, env, host);
 
   // pnpm's bin entries are scripts, not symlinks, so the path may stop at the script. Its text names the target.
-  const pnpmTarget = new RegExp(`/global/[^/\\s"']+/(?:[^\\s"']*/)?${inPackage}`, "u");
+  const pnpmTarget = new RegExp(`/global/([^/\\s"']+)/(?:[^\\s"']*/)?${inPackage}`, "u");
   const direct = path.match(pnpmTarget);
-  if (direct) return pnpmOwner(spec, path.slice(0, direct.index), npmLookup, env, host);
+  if (direct) {
+    const home = path.slice(0, direct.index);
+    return pnpmOwner(spec, home, /^v\d+$/u.test(direct[1]) ? join(home, "bin") : home, npmLookup, env, host);
+  }
   const shim = await host.readText(path);
   if (shim && pnpmTarget.test(shim)) {
     // Spelled as on PATH when only a parent folder is a symlink: pnpm compares its store location as text.
     const folder = (await host.realpath(dirname(binary)).catch(() => undefined)) === dirname(path) ? dirname(binary) : dirname(path);
     // From pnpm 11 the script sits in `<home>/bin` and points up at `../global`.
-    return pnpmOwner(spec, shim.includes("/../global/") ? dirname(folder) : folder, npmLookup, env, host);
+    return pnpmOwner(spec, shim.includes("/../global/") ? dirname(folder) : folder, folder, npmLookup, env, host);
   }
 
-  if (spec.selfManaged.test(path)) {
+  const self = path.match(spec.selfManaged);
+  if (self) {
     return {
       managedBy: "self",
       lookup: npmLookup,
       installer: {
+        location: path.slice(0, self.index! + self[0].length),
         canPin: spec.selfPins,
         command: (version) => ({ argv: spec.selfCommand(binary, version), env: withPath(env, dirname(binary)) }),
       },
@@ -578,7 +604,7 @@ export async function runtimeVersion(provider: ManagedProvider, options: Runtime
   };
 }
 
-/** Binaries with an update running in this process. Two package manager runs over one install can break it. */
+/** Install locations with an update running in this process. Aliases share one lock. */
 const updating = new Set<string>();
 
 /**
@@ -610,14 +636,16 @@ export async function updateRuntime(provider: ManagedProvider, options: RuntimeT
     return { provider, outcome: "up-to-date", from, to: from, managedBy: owner.managedBy, path: found.path ?? binary };
   }
 
-  if (updating.has(binary)) throw new RuntimeUpdateError("in-progress", `An update of ${binary} is already running.`, { from, target });
-  updating.add(binary);
+  const location = await host.realpath(installer.location).catch(() => installer.location);
+  const lock = `${owner.managedBy}:${location}`;
+  if (updating.has(lock)) throw new RuntimeUpdateError("in-progress", `An update of ${binary} is already running.`, { from, target });
+  updating.add(lock);
   try {
     const { argv, env } = installer.command(target);
     const ran = await host.exec(argv[0], argv.slice(1), { env, cwd: tmpdir(), timeoutMs: options.timeoutMs ?? UPDATE_TIMEOUT_MS });
     return await verifyUpdate(provider, { binary, from, target, pinned: installer.canPin, argv, ran, owner }, options, host);
   } finally {
-    updating.delete(binary);
+    updating.delete(lock);
   }
 }
 
@@ -638,8 +666,8 @@ async function verifyUpdate(
     throw new RuntimeUpdateError("installer-failed", `Updating ${spec.name} with ${owner.managedBy} failed: ${ran.error ?? `it exited with code ${ran.exitCode}`}. It now reports ${to ?? "no version"}.`, details);
   }
   if (!to) throw new RuntimeUpdateError("version-mismatch", `The installer finished, but ${read.problem ?? `${spec.name} reports no version`}.`, details);
-  if (pinned ? to !== target : to === from) {
-    throw new RuntimeUpdateError("version-mismatch", `The installer finished, but ${spec.name} reports ${to} and not ${pinned ? target : `a newer version than ${from}`}.`, details);
+  if (pinned ? to !== target : to !== target && !isNewer(to, target)) {
+    throw new RuntimeUpdateError("version-mismatch", `The installer finished, but ${spec.name} reports ${to} and not ${pinned ? target : `${target} or newer`}.`, details);
   }
   const refused = incompatibility(provider, to, options.minimumVersion);
   if (refused) throw new RuntimeUpdateError("incompatible-result", `${spec.name} is now ${to}, which this library would refuse to run: ${refused}`, details);

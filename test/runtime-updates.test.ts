@@ -184,7 +184,7 @@ test("a pnpm global before pnpm 11: a script in the home, naming its target", as
   assert.equal(status.managedBy, "pnpm");
   assert.equal(status.path, `${home}/codex`);
   await updateRuntime("codex", { host, env });
-  assert.deepEqual(ran[0].argv, [`${home}/pnpm`, "add", "--global", "@openai/codex@0.166.0"]);
+  assert.deepEqual(ran[0].argv, [`${home}/pnpm`, "add", "--global", "--global-dir", `${home}/global`, "--global-bin-dir", home, "@openai/codex@0.166.0"]);
   assert.equal(ran[0].env.PNPM_HOME, home);
   assert.deepEqual(ran[0].env.PATH?.split(":").slice(0, 2), [`${home}/bin`, home]);
 });
@@ -201,7 +201,7 @@ test("a pnpm global from pnpm 11: the script sits in <home>/bin and points up", 
   const target = { executable: "claude", host, env };
   assert.equal((await runtimeVersion("claude", target)).managedBy, "pnpm");
   await updateRuntime("claude", target);
-  assert.deepEqual(ran[0].argv, ["/opt/tools/bin/pnpm", "add", "--global", "--allow-build=@anthropic-ai/claude-code", "@anthropic-ai/claude-code@2.1.316"]);
+  assert.deepEqual(ran[0].argv, ["/opt/tools/bin/pnpm", "add", "--global", "--global-dir", `${home}/global`, "--global-bin-dir", `${home}/bin`, "--allow-build=@anthropic-ai/claude-code", "@anthropic-ai/claude-code@2.1.316"]);
   assert.equal(ran[0].env.PNPM_HOME, home);
 });
 
@@ -266,6 +266,37 @@ test("a bun global linked straight to the platform package", async () => {
   assert.equal((await runtimeVersion("claude", target)).managedBy, "bun");
   await updateRuntime("claude", target);
   assert.deepEqual(ran[0].argv, [`${root}/bin/bun`, "add", "--global", "--trust", "@anthropic-ai/claude-code@2.1.316"]);
+});
+
+test("global destination overrides cannot redirect Bun or pnpm to another install", async () => {
+  for (const manager of ["bun", "pnpm"] as const) {
+    const root = `/home/me/.${manager}`;
+    const bin = join(root, "bin");
+    const globalDir = manager === "bun" ? join(root, "install/global") : join(root, "global");
+    const binary = join(bin, "codex");
+    const machine: FakeMachine = {
+      path: bin,
+      executables: [binary, join(bin, manager)],
+      links: { [binary]: join(globalDir, manager === "bun" ? "node_modules/@openai/codex/bin/codex.js" : "v11/abc/node_modules/@openai/codex/bin/codex.js") },
+      version: "codex-cli 0.164.0",
+    };
+    const { host, env, ran } = fake(machine);
+    const configuredEnv = { ...env, BUN_INSTALL_GLOBAL_DIR: "/other/global", BUN_INSTALL_BIN: "/other/bin", PNPM_CONFIG_GLOBAL_DIR: "/other/global", PNPM_CONFIG_GLOBAL_BIN_DIR: "/other/bin" };
+    const redirected: Partial<RuntimeHost> = {
+      ...host,
+      exec: async (command, args, options) => {
+        if (args[0] !== "--version") {
+          const flag = (name: string) => args.includes(name) ? args[args.indexOf(name) + 1] : undefined;
+          const destination = manager === "bun" ? options.env.BUN_INSTALL_GLOBAL_DIR : flag("--global-dir") ?? options.env.PNPM_CONFIG_GLOBAL_DIR;
+          const bins = manager === "bun" ? options.env.BUN_INSTALL_BIN : flag("--global-bin-dir") ?? options.env.PNPM_CONFIG_GLOBAL_BIN_DIR;
+          if (destination === globalDir && bins === bin) machine.version = "codex-cli 0.166.0";
+        }
+        return host.exec!(command, args, options);
+      },
+    };
+    assert.equal((await updateRuntime("codex", { host: redirected, env: configuredEnv })).to, "0.166.0", manager);
+    assert.equal(ran.length, 1);
+  }
 });
 
 test("a similarly named package is not the runtime's", async () => {
@@ -510,6 +541,27 @@ test("a release is newer than its own prerelease", async () => {
   assert.equal((await runtimeVersion("codex", { host, env })).newerAvailable, true);
 });
 
+test("prereleases follow semver order when offering and applying updates", async () => {
+  for (const [from, to] of [
+    ["0.166.0-alpha.2", "0.166.0-alpha.10"],
+    ["0.166.0-alpha.10", "0.166.0-beta.1"],
+    ["0.166.0-alpha", "0.166.0-alpha.1"],
+    ["0.166.0-1", "0.166.0-alpha"],
+    ["0.166.0-alpha.9007199254740992", "0.166.0-alpha.9007199254740993"],
+  ]) {
+    const { host, env } = fake(npmCodex({
+      version: `codex-cli ${from}`,
+      documents: { [NPM_CODEX]: { version: to } },
+      install: (machine) => void (machine.version = `codex-cli ${to}`),
+    }));
+    assert.equal((await runtimeVersion("codex", { host, env })).updateOffered, true, `${from} to ${to}`);
+    assert.equal((await updateRuntime("codex", { host, env })).outcome, "updated");
+    assert.equal((await runtimeVersion("codex", { host, env })).updateOffered, false);
+    const older = fake(npmCodex({ version: `codex-cli ${to}`, documents: { [NPM_CODEX]: { version: from } } }));
+    assert.equal((await updateRuntime("codex", { host: older.host, env: older.env })).outcome, "up-to-date");
+  }
+});
+
 test("an exact version installs that version, for rolling back", async () => {
   const { host, ran, looked, env } = fake(npmCodex({ version: "codex-cli 0.166.0", install: (machine) => void (machine.version = "codex-cli 0.164.0") }));
   const result = await updateRuntime("codex", { host, env, version: "0.164.0" });
@@ -622,6 +674,12 @@ test("an updater that cannot pin may land on another newer version, but must mov
   assert.equal((await updateRuntime("codex", { host: moved.host, env: moved.env })).to, "0.167.0");
   const stuck = fake(machine(() => undefined));
   await failure(updateRuntime("codex", { host: stuck.host, env: stuck.env }), "version-mismatch");
+  for (const version of ["0.164.1", "0.165.0"]) {
+    const stale = fake(machine((state) => void (state.version = `codex-cli ${version}`)));
+    await failure(updateRuntime("codex", { host: stale.host, env: stale.env }), "version-mismatch");
+  }
+  const downgraded = fake({ ...machine((state) => void (state.version = "codex-cli 0.164.0")), version: "codex-cli 0.165.0" });
+  await failure(updateRuntime("codex", { host: downgraded.host, env: downgraded.env }), "version-mismatch");
 });
 
 test("an updater that lands on a version the engine would refuse throws, with the version to go back to", async () => {
@@ -662,6 +720,70 @@ test("a second update of the same binary is refused while the first runs", async
   await failure(first, "installer-failed");
   // Free again once it has ended.
   await failure(updateRuntime("codex", { host, env, version: "0.165.0" }), "version-mismatch");
+});
+
+test("updates through aliases share a lock", async () => {
+  let release = () => {};
+  let started = () => {};
+  const blocked = new Promise<void>((done) => (release = done));
+  const installing = new Promise<void>((done) => (started = done));
+  const alias = "/opt/bin/codex";
+  const binary = `${NVM}/lib/node_modules/@openai/codex/bin/codex.js`;
+  const { host, env } = fake(npmCodex({
+    executables: [`${NVM}/bin/codex`, `${NVM}/bin/npm`, alias],
+    links: { [`${NVM}/bin/codex`]: binary, [alias]: binary },
+  }));
+  const slow: Partial<RuntimeHost> = {
+    ...host,
+    exec: async (command, args, options) => {
+      if (args[0] === "--version") return host.exec!(command, args, options);
+      started();
+      await blocked;
+      return { exitCode: 1, stdout: "", stderr: "" };
+    },
+  };
+  const first = updateRuntime("codex", { host: slow, env });
+  await installing;
+  try {
+    // A second installer must not start, so use a host that would fail immediately if it did.
+    await failure(updateRuntime("codex", { host, env, executable: alias }), "in-progress");
+  } finally {
+    release();
+    await failure(first, "installer-failed");
+  }
+});
+
+test("a native update stays locked after its symlink points to the new version", async () => {
+  const binary = "/home/me/.local/bin/claude";
+  const machine: FakeMachine = {
+    executables: [binary],
+    links: { [binary]: "/home/me/.local/share/claude/versions/2.1.310" },
+    version: "2.1.310 (Claude Code)",
+  };
+  const { host, env } = fake(machine);
+  let release = () => {};
+  let started = () => {};
+  const blocked = new Promise<void>((done) => (release = done));
+  const installing = new Promise<void>((done) => (started = done));
+  const slow: Partial<RuntimeHost> = {
+    ...host,
+    exec: async (command, args, options) => {
+      if (args[0] === "--version") return host.exec!(command, args, options);
+      machine.links![binary] = "/home/me/.local/share/claude/versions/2.1.316";
+      machine.version = "2.1.316 (Claude Code)";
+      started();
+      await blocked;
+      return { exitCode: 0, stdout: "", stderr: "" };
+    },
+  };
+  const first = updateRuntime("claude", { executable: binary, host: slow, env });
+  await installing;
+  try {
+    await failure(updateRuntime("claude", { executable: binary, host, env, version: "2.1.310" }), "in-progress");
+  } finally {
+    release();
+    assert.equal((await first).to, "2.1.316");
+  }
 });
 
 test("anything but a strict semver is refused before a lookup or a command", async () => {
@@ -921,6 +1043,13 @@ test("Codex notes: a prerelease only when it is the target; drafts, odd tags and
   assert.deepEqual(await runtimeReleaseNotes("codex", { from: "0.165.9", to: "0.167.0-alpha.2", host }), [
     { version: "0.167.0-alpha.2", text: "the target" },
     { version: "0.166.0", text: "kept" },
+  ]);
+});
+
+test("Codex notes include a later prerelease of the same version", async () => {
+  const { host } = fake({ documents: release("0.167.0-alpha.10", "new prerelease") });
+  assert.deepEqual(await runtimeReleaseNotes("codex", { from: "0.167.0-alpha.2", to: "0.167.0-alpha.10", host }), [
+    { version: "0.167.0-alpha.10", text: "new prerelease" },
   ]);
 });
 
