@@ -267,7 +267,8 @@ async function locate(command: string, env: Env, host: RuntimeHost): Promise<str
 
 /** Runs `<binary> --version`. A failure is an answer, not an exception. */
 async function readVersion(binary: string, name: string, env: Env, host: RuntimeHost): Promise<{ version?: string; problem?: string }> {
-  const result = await host.exec(binary, ["--version"], { env: withPath(env, dirname(binary)), timeoutMs: VERSION_TIMEOUT_MS });
+  // Outside any project: pnpm switches to the version a `packageManager` field in the current folder names.
+  const result = await host.exec(binary, ["--version"], { env: withPath(env, dirname(binary)), cwd: tmpdir(), timeoutMs: VERSION_TIMEOUT_MS });
   const version = result.exitCode === 0 ? result.stdout.match(/\b\d+\.\d+\.\d+(?:-[0-9A-Za-z.-]+)?\b/u)?.[0] : undefined;
   if (version) return { version };
   const detail = result.error ?? (`${result.stderr}${result.stdout}`.trim().split("\n").at(-1) || `it exited with code ${result.exitCode}`);
@@ -385,6 +386,15 @@ async function npmOwner(spec: Spec, prefix: string, lookup: Owner["lookup"], env
 async function pnpmOwner(spec: Spec, home: string, bin: string, lookup: Owner["lookup"], env: Env, host: RuntimeHost): Promise<Owner> {
   const pnpm = await ownTool("pnpm", [join(home, "bin", "pnpm"), join(home, "pnpm")], env, host);
   if (!pnpm) return { managedBy: "pnpm", lookup, blocked: `${spec.name} is a pnpm global under ${home}, but pnpm was not found to update it.` };
+  const { version: pnpmVersion } = await readVersion(pnpm, "pnpm", env, host);
+  const parsed = pnpmVersion ? parseRuntimeVersion(pnpmVersion) : undefined;
+  const olderThan = (minimum: readonly [number, number, number]) => Boolean(parsed && compareVersions(parsed, minimum) < 0);
+  // `--allow-build` came in pnpm 10.4, and before it the install script cannot be allowed for one command.
+  if (spec.installScript && olderThan([10, 4, 0])) {
+    return { managedBy: "pnpm", lookup, blocked: `Updating ${spec.name} takes pnpm 10.4 or newer, to allow its install script, and this pnpm is ${pnpmVersion}. Update pnpm first.` };
+  }
+  // pnpm 12 refuses `--global-bin-dir` and reads the folder from its environment instead.
+  const binFlag = olderThan([12, 0, 0]);
   return {
     managedBy: "pnpm",
     lookup,
@@ -392,8 +402,8 @@ async function pnpmOwner(spec: Spec, home: string, bin: string, lookup: Owner["l
       location: home,
       canPin: true,
       command: (version) => ({
-        argv: [pnpm, "add", "--global", "--global-dir", join(home, "global"), "--global-bin-dir", bin, ...(spec.installScript ? [`--allow-build=${spec.package}`] : []), `${spec.package}@${version}`],
-        env: { ...withPath(env, join(home, "bin"), home), PNPM_HOME: home },
+        argv: [pnpm, "add", "--global", "--global-dir", join(home, "global"), ...(binFlag ? ["--global-bin-dir", bin] : []), ...(spec.installScript ? [`--allow-build=${spec.package}`] : []), `${spec.package}@${version}`],
+        env: { ...withPath(env, join(home, "bin"), home), PNPM_HOME: home, ...(binFlag ? {} : { PNPM_CONFIG_GLOBAL_BIN_DIR: bin, pnpm_config_global_bin_dir: bin }) },
       }),
     },
   };
@@ -556,8 +566,8 @@ async function sdkReport(found: Inspection, latest: string | undefined, host: Ru
 
 /**
  * Reports a runtime's status without starting a turn or an app-server. The only
- * process it starts is `<binary> --version`. A missing runtime or a failed lookup
- * is a field in the result, not an exception.
+ * processes it starts are `<binary> --version` and, for a pnpm global, `pnpm --version`.
+ * A missing runtime or a failed lookup is a field in the result, not an exception.
  */
 export async function runtimeVersion(provider: ManagedProvider, options: RuntimeTarget & RuntimeCheckOptions = {}): Promise<RuntimeVersionStatus> {
   const host = hostFrom(options.host);

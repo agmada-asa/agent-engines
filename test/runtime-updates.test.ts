@@ -3,7 +3,7 @@
 import assert from "node:assert/strict";
 import { chmod, mkdir, mkdtemp, realpath, rm, symlink, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
-import { dirname, join, resolve } from "node:path";
+import { basename, dirname, join, resolve } from "node:path";
 import { after, test } from "node:test";
 import { AcpEngine } from "../src/acp/engine.ts";
 import { ClaudeEngine } from "../src/claude/engine.ts";
@@ -36,6 +36,8 @@ interface FakeMachine {
   path?: string;
   /** What `--version` prints; undefined makes it fail. */
   version?: string;
+  /** What `pnpm --version` prints; defaults to 11.0.0. */
+  pnpmVersion?: string;
   /** Runs the installer: return what it reports, and set `machine.version` to change the binary. */
   install?: (machine: FakeMachine, argv: readonly string[]) => Partial<RuntimeExecResult> | void;
   /** Registry answers by URL; an Error fails the lookup. Merged over `PUBLISHED`. */
@@ -58,6 +60,7 @@ function fake(machine: FakeMachine) {
     exec: async (command, args, options) => {
       const argv = [command, ...args];
       if (args[0] === "--version") {
+        if (basename(command) === "pnpm") return { exitCode: 0, stdout: `${machine.pnpmVersion ?? "11.0.0"}\n`, stderr: "" };
         return machine.version === undefined
           ? { exitCode: 1, stdout: "", stderr: "stub: the native binary is missing" }
           : { exitCode: 0, stdout: `${machine.version}\n`, stderr: "" };
@@ -203,6 +206,47 @@ test("a pnpm global from pnpm 11: the script sits in <home>/bin and points up", 
   await updateRuntime("claude", target);
   assert.deepEqual(ran[0].argv, ["/opt/tools/bin/pnpm", "add", "--global", "--global-dir", `${home}/global`, "--global-bin-dir", `${home}/bin`, "--allow-build=@anthropic-ai/claude-code", "@anthropic-ai/claude-code@2.1.316"]);
   assert.equal(ran[0].env.PNPM_HOME, home);
+});
+
+test("pnpm 12 refuses --global-bin-dir, so the bin folder is pinned through its environment", async () => {
+  const home = "/home/me/Library/pnpm";
+  const { host, ran, env } = fake({
+    path: `${home}/bin`,
+    executables: [`${home}/bin/codex`, `${home}/bin/pnpm`],
+    texts: { [`${home}/bin/codex`]: `#!/bin/sh\nexec node "$basedir_abs/../global/v11/abc123/node_modules/@openai/codex/bin/codex.js" "$@"\n` },
+    version: "codex-cli 0.164.0",
+    pnpmVersion: "12.0.0",
+    install: (machine) => void (machine.version = "codex-cli 0.166.0"),
+  });
+  await updateRuntime("codex", { host, env: { ...env, PNPM_CONFIG_GLOBAL_BIN_DIR: "/other/bin" } });
+  assert.deepEqual(ran[0].argv, [`${home}/bin/pnpm`, "add", "--global", "--global-dir", `${home}/global`, "@openai/codex@0.166.0"]);
+  assert.equal(ran[0].env.PNPM_CONFIG_GLOBAL_BIN_DIR, `${home}/bin`);
+  assert.equal(ran[0].env.pnpm_config_global_bin_dir, `${home}/bin`);
+});
+
+test("pnpm before 10.4 cannot allow Claude Code's install script, so that update is not offered; Codex has no script and still is", async () => {
+  const home = "/home/me/.local/share/pnpm";
+  const machine = (command: string, target: string, version: string): FakeMachine => ({
+    path: home,
+    executables: [`${home}/${command}`, `${home}/pnpm`],
+    texts: { [`${home}/${command}`]: `#!/bin/sh\nexec node "$basedir/global/5/.pnpm/x/node_modules/${target}" "$@"\n` },
+    version,
+    pnpmVersion: "10.3.0",
+    install: (self) => void (self.version = "0.166.0"),
+  });
+  const claude = fake(machine("claude", "@anthropic-ai/claude-code/bin/claude.exe", "2.1.310 (Claude Code)"));
+  const target = { executable: "claude", host: claude.host, env: claude.env };
+  const status = await runtimeVersion("claude", target);
+  assert.equal(status.managedBy, "pnpm");
+  assert.equal(status.canUpdate, false);
+  assert.equal(status.updateOffered, false);
+  assert.match(status.reason ?? "", /pnpm 10\.4 or newer.*10\.3\.0/u);
+  await failure(updateRuntime("claude", target), "not-updatable");
+  assert.equal(claude.ran.length, 0);
+
+  const codex = fake(machine("codex", "@openai/codex/bin/codex.js", "codex-cli 0.164.0"));
+  assert.equal((await updateRuntime("codex", { host: codex.host, env: codex.env })).to, "0.166.0");
+  assert.equal(codex.ran[0].argv.includes("--global-bin-dir"), true);
 });
 
 test("a pnpm home under a symlinked folder keeps the spelling on PATH, because pnpm compares its store location as text", async () => {
@@ -969,6 +1013,19 @@ test("ClaudeEngine checks through its own SDK and environment, on the absolute b
   assert.equal(queries[0].options.env.ANTHROPIC_API_KEY, undefined, "an engine that refuses API keys does not pass them on");
   assert.deepEqual(queries[0].inputs, [], "no message, so no model turn");
   assert.equal(queries[0].closed, true);
+});
+
+test("ClaudeEngine: a thread prewarmed before an update is closed, so the next one starts on the new binary", async () => {
+  const { host } = fake(sharedClaude(SHARED_UPDATE));
+  const { sdk, queries } = fakeClaudeSdk({ version: "2.1.316" });
+  const engine = new ClaudeEngine({ sdk, executable: "/opt/homebrew/bin/claude", env: { PATH: `${NVM}/bin` } });
+  await engine.prewarm({ cwd: "/tmp" });
+  assert.equal(queries.length, 1);
+  await engine.updateRuntime({ host });
+  assert.equal(queries[0].closed, true);
+  await engine.startThread({ cwd: "/tmp" });
+  assert.equal(queries.length, 2, "not the old process");
+  await engine.close();
 });
 
 test("ClaudeEngine: its SDK reporting another version fails the update", async () => {

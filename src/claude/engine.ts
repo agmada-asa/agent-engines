@@ -417,10 +417,13 @@ export class ClaudeEngine implements Engine {
     return runtimeVersion("claude", { ...options, executable: this.options.executable, env: this.options.env, minimumVersion: this.options.minimumVersion });
   }
 
-  updateRuntime(options: RuntimeUpdateOptions = {}): Promise<RuntimeUpdateResult> {
+  async updateRuntime(options: RuntimeUpdateOptions = {}): Promise<RuntimeUpdateResult> {
     // The check after an update goes through this engine's SDK and environment, as its threads will.
     const host = { claudeSession: (binary: string) => claudeSessionVersion(this.sdk.query, binary, this.environment()), ...options.host };
-    return updateRuntime("claude", { ...options, host, executable: this.options.executable, env: this.options.env, minimumVersion: this.options.minimumVersion });
+    const result = await updateRuntime("claude", { ...options, host, executable: this.options.executable, env: this.options.env, minimumVersion: this.options.minimumVersion });
+    // A prewarmed thread is still on the old binary, and the next startThread would take it.
+    if (result.outcome === "updated") await this.closeSpares();
+    return result;
   }
 
   async models(): Promise<ModelInfo[]> {
@@ -613,11 +616,16 @@ export class ClaudeEngine implements Engine {
   }
 
   async close(): Promise<void> {
+    await this.closeSpares();
+    for (const thread of [...this.threads]) await thread.close().catch(() => undefined);
+  }
+
+  /** Closes the prewarmed threads no startThread has claimed. */
+  private async closeSpares(): Promise<void> {
     for (const spare of this.spares.splice(0)) {
       clearTimeout(spare.timer);
       await spare.thread.then((thread) => thread.close(), () => undefined);
     }
-    for (const thread of [...this.threads]) await thread.close().catch(() => undefined);
   }
 
   /** @internal */

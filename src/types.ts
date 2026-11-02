@@ -34,7 +34,9 @@ export interface Engine {
    * that owns it, then reads the version back and rechecks compatibility. For
    * Claude it also opens an Agent SDK session on the new binary, without a model
    * turn. Running threads keep the process they have; restarting them is the
-   * app's choice. Anything short of the result it returns throws `RuntimeUpdateError`.
+   * app's choice. Codex threads share one app-server per engine, so new ones stay
+   * on the old version too, until the app makes a new engine. Anything short of the
+   * result it returns throws `RuntimeUpdateError`.
    */
   updateRuntime(options?: RuntimeUpdateOptions): Promise<RuntimeUpdateResult>;
   /** The models and efforts the signed-in runtime offers right now. */

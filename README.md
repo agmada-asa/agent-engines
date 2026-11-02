@@ -296,7 +296,7 @@ Codex adds the earlier conversation to the thread's history; Claude and ACP agen
 
 ## Runtime versions and updates
 
-`engine.runtimeVersion()` says what is installed and what is published, without starting a turn or an app-server. `engine.updateRuntime()` moves it. When to check, whether to ask and when to restart are the app's to decide. Running threads keep the process they have, so an update reaches new ones only.
+`engine.runtimeVersion()` says what is installed and what is published, without starting a turn or an app-server. `engine.updateRuntime()` moves it. When to check, whether to ask and when to restart are the app's to decide. Running threads keep the process they have. On Claude an update reaches new threads, and any prewarmed ones are closed. Codex threads share one app-server per engine, so new threads stay on the old version too until the app makes a new engine (`close()` is final).
 
 ```ts
 const status = await engine.runtimeVersion();
@@ -312,7 +312,7 @@ if (status.updateOffered) {
 }
 ```
 
-- **Who owns it** comes from where the binary really lives: `npm`, `pnpm` or `bun` for a global install, `homebrew` for a cask, `self` for Claude Code's native installer or Codex's standalone one, `bundled` for the copy in the Agent SDK, `unknown` for the rest. An update goes through that owner. An npm global is pinned with `--prefix`, because npm otherwise installs to the prefix of whichever node runs it; it uses the prefix's own npm, or any npm on `PATH` if the prefix has none.
+- **Who owns it** comes from where the binary really lives: `npm`, `pnpm` or `bun` for a global install, `homebrew` for a cask, `self` for Claude Code's native installer or Codex's standalone one, `bundled` for the copy in the Agent SDK, `unknown` for the rest. An update goes through that owner. An npm global is pinned with `--prefix`, because npm otherwise installs to the prefix of whichever node runs it; it uses the prefix's own npm, or any npm on `PATH` if the prefix has none. Claude Code under pnpm needs pnpm 10.4 or newer, to allow its install script; with an older one `canUpdate` is false and `reason` says so.
 - **`updateOffered`** means a newer version, an installer to run and a version the engine would accept. A new Codex major comes back as not offered, with `reason`. `compatible` and `latestCompatible` apply the engine's own check, so Claude Code has a floor and no ceiling.
 - **The shared Claude.** `findSharedClaude({ env })` returns the absolute path and version of the `claude` on `PATH`, so an app can run the install the terminal uses: pass `path` as `executable`. It returns nothing if that `claude` is missing, does not run or is below the minimum, so the app can fall back to the bundled copy. An app started with a thin `PATH`, as under launchd, should pass an `env` with a fuller one.
 - **A bundled Claude**, which is what runs without `executable`, reports the bundled version and what the latest SDK pairs with. Only a new release of the app can move it, so `canUpdate` is false.
