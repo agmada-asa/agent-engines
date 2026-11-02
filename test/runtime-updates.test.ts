@@ -3,13 +3,13 @@
 import assert from "node:assert/strict";
 import { chmod, mkdir, mkdtemp, realpath, rm, symlink, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
-import { dirname, join } from "node:path";
+import { dirname, join, resolve } from "node:path";
 import { after, test } from "node:test";
 import { AcpEngine } from "../src/acp/engine.ts";
 import { ClaudeEngine } from "../src/claude/engine.ts";
 import { CodexEngine } from "../src/codex/engine.ts";
 import { RuntimeUpdateError, UnsupportedFeatureError, type RuntimeUpdateFailure } from "../src/errors.ts";
-import { runtimeVersion, updateRuntime } from "../src/runtime-updates.ts";
+import { findSharedClaude, runtimeReleaseNotes, runtimeVersion, updateRuntime } from "../src/runtime-updates.ts";
 import type { BundledClaude, RuntimeExecResult, RuntimeHost } from "../src/types.ts";
 import { fakeAcpSpawner } from "./fake-acp-agent.ts";
 import { fakeClaudeSdk } from "./fake-claude-sdk.ts";
@@ -43,6 +43,8 @@ interface FakeMachine {
   /** Every lookup fails, as when offline. */
   offline?: boolean;
   bundled?: BundledClaude;
+  /** What an Agent SDK session on the binary reports; an Error fails it. Defaults to what `--version` prints. */
+  session?: string | Error;
   platform?: NodeJS.Platform;
 }
 
@@ -50,6 +52,7 @@ interface FakeMachine {
 function fake(machine: FakeMachine) {
   const ran: Array<{ argv: string[]; env: Readonly<Record<string, string | undefined>>; cwd?: string }> = [];
   const looked: Array<{ url: string; headers: Record<string, string> }> = [];
+  const sessions: string[] = [];
   const host: Partial<RuntimeHost> = {
     platform: machine.platform ?? "darwin",
     exec: async (command, args, options) => {
@@ -67,14 +70,19 @@ function fake(machine: FakeMachine) {
       if (machine.offline) throw new TypeError("fetch failed");
       const document = { ...PUBLISHED, ...machine.documents }[url];
       if (document instanceof Error) throw document;
-      return { ok: document !== undefined, json: async () => document };
+      return { ok: document !== undefined, json: async () => document, text: async () => String(document) };
     },
     realpath: async (path) => machine.links?.[path] ?? path,
     isExecutable: async (path) => (machine.executables ?? []).includes(path),
     readText: async (path) => machine.texts?.[path],
     bundledClaude: async () => machine.bundled,
+    claudeSession: async (binary) => {
+      sessions.push(binary);
+      if (machine.session instanceof Error) throw machine.session;
+      return machine.session ?? machine.version?.split(" ")[0];
+    },
   };
-  return { host, ran, looked, env: { PATH: machine.path ?? "/usr/bin" } };
+  return { host, ran, looked, sessions, env: { PATH: machine.path ?? "/usr/bin" } };
 }
 
 /** The error an update fails with, checked for its reason. */
@@ -282,7 +290,7 @@ test("a Homebrew cask: its own brew, the cask's own channel, and no exact versio
   assert.equal(status.latest, "2.1.309", "brew can only reach what the cask has, not npm's 2.1.316");
   assert.equal(status.canPinVersion, false);
   assert.equal(status.updateOffered, true);
-  assert.deepEqual(looked.map((lookup) => lookup.url), ["https://formulae.brew.sh/api/cask/claude-code.json"]);
+  assert.deepEqual(looked.map((lookup) => lookup.url).sort(), ["https://formulae.brew.sh/api/cask/claude-code.json", NPM_SDK]);
   assert.match((await failure(updateRuntime("claude", { ...target, version: "2.1.300" }), "not-updatable")).message, /Homebrew can only/);
   assert.equal(ran.length, 0);
   const result = await updateRuntime("claude", target);
@@ -404,7 +412,7 @@ test("a bundled Claude reports the bundled version, the SDK's latest pairing, an
   assert.equal(status.version, "2.1.308", "from the SDK's pairing, not from the claude on PATH");
   assert.equal(status.latest, "2.1.316");
   assert.equal(status.path, BUNDLED.path);
-  assert.deepEqual(status.sdk, { version: "0.3.308", latest: "0.3.316" });
+  assert.deepEqual(status.sdk, { version: "0.3.308", claudeCode: "2.1.308", latest: "0.3.316" });
   assert.equal(status.newerAvailable, true);
   assert.equal(status.canUpdate, false);
   assert.equal(status.updateOffered, false);
@@ -735,6 +743,248 @@ test("AcpEngine: says plainly that it cannot, without starting the agent", async
   assert.deepEqual(ran, []);
   assert.deepEqual(looked, []);
   assert.equal((await new AcpEngine({ command: "gone", env }).runtimeVersion({ host })).installed, false);
+});
+
+// Finding the shared Claude
+
+/** The `claude` on PATH as an npm global, under a prefix found on the given PATH. */
+function sharedClaude(extra: Partial<FakeMachine> = {}): FakeMachine {
+  return {
+    path: "/usr/bin:/opt/homebrew/bin",
+    executables: ["/opt/homebrew/bin/claude"],
+    links: { "/opt/homebrew/bin/claude": "/opt/homebrew/lib/node_modules/@anthropic-ai/claude-code/bin/claude.exe" },
+    version: "2.1.310 (Claude Code)",
+    ...extra,
+  };
+}
+
+test("findSharedClaude: the first claude on the given PATH, absolute and unresolved, with its version", async () => {
+  const { host, env } = fake(sharedClaude());
+  assert.deepEqual(await findSharedClaude({ host, env }), { path: "/opt/homebrew/bin/claude", version: "2.1.310" });
+});
+
+test("findSharedClaude: a relative PATH entry still gives an absolute path", async () => {
+  const absolute = resolve("tools/claude");
+  const { host } = fake({ executables: [absolute], version: "2.1.310 (Claude Code)" });
+  assert.deepEqual(await findSharedClaude({ host, env: { PATH: "tools" } }), { path: absolute, version: "2.1.310" });
+});
+
+test("findSharedClaude: nothing when it is off a thin PATH, does not run, is too old or says no version", async () => {
+  const thin = fake(sharedClaude());
+  assert.equal(await findSharedClaude({ host: thin.host, env: { PATH: "/usr/bin:/bin" } }), undefined);
+  const noPath = fake(sharedClaude());
+  assert.equal(await findSharedClaude({ host: noPath.host, env: {} }), undefined);
+  const stub = fake(sharedClaude({ version: undefined }));
+  assert.equal(await findSharedClaude({ host: stub.host, env: stub.env }), undefined);
+  const old = fake(sharedClaude({ version: "2.1.100 (Claude Code)" }));
+  assert.equal(await findSharedClaude({ host: old.host, env: old.env }), undefined);
+  const garbled = fake(sharedClaude({ version: "who knows" }));
+  assert.equal(await findSharedClaude({ host: garbled.host, env: garbled.env }), undefined);
+});
+
+test("findSharedClaude: the minimum can be raised, and it starts no session and looks nothing up", async () => {
+  const { host, env, ran, looked, sessions } = fake(sharedClaude());
+  assert.equal(await findSharedClaude({ host, env, minimumVersion: "2.1.311" }), undefined);
+  assert.equal((await findSharedClaude({ host, env, minimumVersion: "2.1.310" }))?.version, "2.1.310");
+  assert.deepEqual([ran.length, looked.length, sessions.length], [0, 0, 0]);
+});
+
+// Checking the SDK against the new Claude
+
+const SHARED_UPDATE: Partial<FakeMachine> = {
+  path: `${NVM}/bin:/opt/homebrew/bin`,
+  executables: ["/opt/homebrew/bin/claude", `${NVM}/bin/npm`],
+  install: (machine) => void (machine.version = "2.1.316 (Claude Code)"),
+};
+
+test("a Claude update opens an SDK session on the binary it updated, and passes when the versions agree", async () => {
+  const { host, env, sessions } = fake(sharedClaude(SHARED_UPDATE));
+  const result = await updateRuntime("claude", { executable: "claude", host, env });
+  assert.equal(result.to, "2.1.316");
+  assert.deepEqual(sessions, ["/opt/homebrew/bin/claude"]);
+});
+
+test("a session reporting another version fails the update, with the version to go back to", async () => {
+  const { host, env } = fake(sharedClaude({ ...SHARED_UPDATE, session: "2.1.310" }));
+  const error = await failure(updateRuntime("claude", { executable: "claude", host, env }), "sdk-check-failed");
+  assert.match(error.message, /Claude Code reports 2\.1\.316, but a session through the Agent SDK reports 2\.1\.310/);
+  assert.equal(error.from, "2.1.310");
+  assert.equal(error.to, "2.1.316");
+  assert.equal(error.exitCode, 0);
+});
+
+test("a session that will not start, or reports no version, fails the update", async () => {
+  const broken = fake(sharedClaude({ ...SHARED_UPDATE, session: new Error("Claude Code process exited with code 1") }));
+  const error = await failure(updateRuntime("claude", { executable: "claude", host: broken.host, env: broken.env }), "sdk-check-failed");
+  assert.match(error.message, /could not open a session on it: Claude Code process exited/);
+  const silent = fake(sharedClaude(SHARED_UPDATE));
+  const host = { ...silent.host, claudeSession: async () => undefined };
+  assert.match((await failure(updateRuntime("claude", { executable: "claude", host, env: silent.env }), "sdk-check-failed")).message, /reports no version/);
+});
+
+test("no session when nothing ran, the installer failed, or the provider is Codex", async () => {
+  const current = fake(sharedClaude({ ...SHARED_UPDATE, version: "2.1.316 (Claude Code)" }));
+  assert.equal((await updateRuntime("claude", { executable: "claude", host: current.host, env: current.env })).outcome, "up-to-date");
+  assert.equal(current.sessions.length, 0);
+  const failed = fake(sharedClaude({ ...SHARED_UPDATE, install: () => ({ exitCode: 1 }) }));
+  await failure(updateRuntime("claude", { executable: "claude", host: failed.host, env: failed.env }), "installer-failed");
+  assert.equal(failed.sessions.length, 0);
+  const codex = fake(npmCodex({ install: (machine) => void (machine.version = "codex-cli 0.166.0") }));
+  await updateRuntime("codex", { host: codex.host, env: codex.env });
+  assert.equal(codex.sessions.length, 0);
+});
+
+test("ClaudeEngine checks through its own SDK and environment, on the absolute binary, sending no prompt", async () => {
+  const { claudeSession: _fake, ...host } = fake(sharedClaude(SHARED_UPDATE)).host;
+  const { sdk, queries } = fakeClaudeSdk({ version: "2.1.316" });
+  const engine = new ClaudeEngine({ sdk, executable: "/opt/homebrew/bin/claude", env: { PATH: `${NVM}/bin`, ANTHROPIC_API_KEY: "sk-test" }, configDir: "/tmp/claude-config" });
+  assert.equal((await engine.updateRuntime({ host })).to, "2.1.316");
+  assert.equal(queries.length, 1);
+  assert.equal(queries[0].options.pathToClaudeCodeExecutable, "/opt/homebrew/bin/claude");
+  assert.equal(queries[0].options.persistSession, false);
+  assert.deepEqual(queries[0].options.tools, []);
+  assert.equal(queries[0].options.env.CLAUDE_CONFIG_DIR, "/tmp/claude-config");
+  assert.equal(queries[0].options.env.ANTHROPIC_API_KEY, undefined, "an engine that refuses API keys does not pass them on");
+  assert.deepEqual(queries[0].inputs, [], "no message, so no model turn");
+  assert.equal(queries[0].closed, true);
+});
+
+test("ClaudeEngine: its SDK reporting another version fails the update", async () => {
+  const { claudeSession: _fake, ...host } = fake(sharedClaude(SHARED_UPDATE)).host;
+  const engine = new ClaudeEngine({ sdk: fakeClaudeSdk({ version: "2.1.310" }).sdk, executable: "/opt/homebrew/bin/claude", env: { PATH: `${NVM}/bin` } });
+  await failure(engine.updateRuntime({ host }), "sdk-check-failed");
+});
+
+test("status shows the SDK and the binary apart for a shared Claude, and not at all for Codex", async () => {
+  const { host, env } = fake(sharedClaude({ bundled: BUNDLED, executables: ["/opt/homebrew/bin/claude", "/usr/bin/npm"] }));
+  const status = await runtimeVersion("claude", { executable: "claude", host, env });
+  assert.equal(status.managedBy, "npm");
+  assert.equal(status.version, "2.1.310");
+  assert.deepEqual(status.sdk, { version: "0.3.308", claudeCode: "2.1.308", latest: "0.3.316" });
+  const unread = fake(sharedClaude());
+  assert.equal((await runtimeVersion("claude", { executable: "claude", host: unread.host, env: unread.env })).sdk, undefined);
+  const codex = fake(npmCodex({ bundled: BUNDLED }));
+  assert.equal((await runtimeVersion("codex", { host: codex.host, env: codex.env })).sdk, undefined);
+});
+
+// Release notes
+
+const CHANGELOG = "https://raw.githubusercontent.com/anthropics/claude-code/main/CHANGELOG.md";
+const GITHUB = "https://api.github.com/repos/openai/codex";
+
+/** GitHub's tag list for one minor version. */
+function tags(minor: string, versions: unknown[]): Record<string, unknown> {
+  return { [`${GITHUB}/git/matching-refs/tags/rust-v${minor}.?per_page=100`]: versions.map((version) => (typeof version === "string" ? { ref: `refs/tags/rust-v${version}` } : version)) };
+}
+
+/** One GitHub release, by its tag. */
+function release(version: string, body: unknown, extra: Record<string, unknown> = {}): Record<string, unknown> {
+  return { [`${GITHUB}/releases/tags/rust-v${version}`]: { tag_name: `rust-v${version}`, body, draft: false, ...extra } };
+}
+
+test("Codex notes: versions after from up to and including to, per version, newest first, patches in, prereleases out", async () => {
+  const { host, looked } = fake({
+    documents: {
+      ...tags("0.166", ["0.166.0", "0.166.0-alpha.1", "0.166.1"]),
+      ...tags("0.165", ["0.165.0", "0.165.0-alpha.1"]),
+      ...tags("0.164", ["0.164.0", "0.164.1", "0.164.1-alpha.1"]),
+      ...release("0.166.0", "## New\n- Added a thing (#1)\n"),
+      ...release("0.165.0", "## Fixes\r\n- [link](https://example.com) and **bold** and `code`\r\n"),
+      ...release("0.164.1", "a patch of from's minor"),
+      ...release("0.166.1", "after to"),
+      ...release("0.164.0", "from itself"),
+    },
+  });
+  assert.deepEqual(await runtimeReleaseNotes("codex", { from: "0.164.0", to: "0.166.0", host }), [
+    { version: "0.166.0", text: "New\n- Added a thing (#1)" },
+    { version: "0.165.0", text: "Fixes\n- link and bold and code" },
+    { version: "0.164.1", text: "a patch of from's minor" },
+  ]);
+  const urls = looked.map((lookup) => lookup.url);
+  assert.equal(urls.length, 6, "three tag lists and three releases, and never the whole list of releases");
+  assert.ok(urls.every((url) => url.startsWith(`${GITHUB}/git/matching-refs/tags/rust-v0.16`) || url.startsWith(`${GITHUB}/releases/tags/rust-v0.16`)), urls.join());
+  assert.ok(looked.every((lookup) => lookup.headers.accept === "application/vnd.github+json" && Object.keys(lookup.headers).length === 1), "no identity sent");
+});
+
+test("Codex notes: a prerelease only when it is the target; drafts, odd tags and empty bodies are left out", async () => {
+  const { host } = fake({
+    documents: {
+      ...tags("0.167", ["0.167.0-alpha.1", "0.167.0-alpha.2"]),
+      ...tags("0.166", ["0.166.0", "0.166.5", "0.166.6", "0.166.7", null, { ref: 7 }, { ref: "refs/tags/rust-v.odd" }, "not-a-version"]),
+      ...release("0.167.0-alpha.2", "the target"),
+      ...release("0.166.0", "kept"),
+      ...release("0.166.5", "unfinished", { draft: true }),
+      ...release("0.166.6", ""),
+      ...release("0.166.7", null),
+    },
+  });
+  assert.deepEqual(await runtimeReleaseNotes("codex", { from: "0.165.9", to: "0.167.0-alpha.2", host }), [
+    { version: "0.167.0-alpha.2", text: "the target" },
+    { version: "0.166.0", text: "kept" },
+  ]);
+});
+
+test("Codex notes: one missing or failed piece keeps the rest", async () => {
+  const listFailed = fake({ documents: { ...tags("0.165", ["0.165.0"]), [`${GITHUB}/git/matching-refs/tags/rust-v0.166.?per_page=100`]: new Error("rate limited"), ...release("0.166.0", "to is tried anyway"), ...release("0.165.0", "older") } });
+  assert.deepEqual((await runtimeReleaseNotes("codex", { from: "0.164.9", to: "0.166.0", host: listFailed.host })).map((note) => note.version), ["0.166.0", "0.165.0"]);
+  const noRelease = fake({ documents: { ...tags("0.166", ["0.166.0", "0.166.1"]), ...release("0.166.1", "has notes") } });
+  assert.deepEqual((await runtimeReleaseNotes("codex", { from: "0.165.9", to: "0.166.1", host: noRelease.host })).map((note) => note.version), ["0.166.1"]);
+});
+
+test("Codex notes: a long jump reads only the newest minors, and a new major only the target", async () => {
+  const jump = fake({ documents: { ...tags("0.166", ["0.166.0"]), ...release("0.166.0", "newest") } });
+  await runtimeReleaseNotes("codex", { from: "0.100.0", to: "0.166.0", host: jump.host });
+  assert.ok(jump.looked.length <= 11, `${jump.looked.length} calls`);
+  assert.ok(!jump.looked.some((lookup) => lookup.url.includes("rust-v0.156.")), "ten minors, newest first");
+  const major = fake({ documents: release("1.0.0", "a new major") });
+  assert.deepEqual(await runtimeReleaseNotes("codex", { from: "0.166.0", to: "1.0.0", host: major.host }), [{ version: "1.0.0", text: "a new major" }]);
+  assert.equal(major.looked.length, 1);
+});
+
+test("Claude notes: read from the changelog, per version, and versions with no entry are simply missing", async () => {
+  const changelog = [
+    "# Changelog\n\n## 2.1.316\n\n- Added `X`\n- Fixed Y\n",
+    "## 2.1.314\n\n- Fixed Z\n",
+    "## 2.1.312\n\n",
+    "## 2.1.311\n- Fixed W\n",
+    "## Unreleased\n- Not a version\n",
+    "## 2.1.310\n- Old\n",
+  ].join("\n");
+  const { host, looked } = fake({ documents: { [CHANGELOG]: changelog } });
+  assert.deepEqual(await runtimeReleaseNotes("claude", { from: "2.1.310", to: "2.1.316", host }), [
+    { version: "2.1.316", text: "- Added X\n- Fixed Y" },
+    { version: "2.1.314", text: "- Fixed Z" },
+    { version: "2.1.311", text: "- Fixed W" },
+  ]);
+  assert.deepEqual(looked, [{ url: CHANGELOG, headers: { accept: "text/plain" } }]);
+});
+
+test("notes: any failure is no notes, and bad versions never reach a URL", async () => {
+  const offline = fake({ offline: true });
+  assert.deepEqual(await runtimeReleaseNotes("codex", { from: "0.164.0", to: "0.166.0", host: offline.host }), []);
+  assert.deepEqual(await runtimeReleaseNotes("claude", { from: "2.1.310", to: "2.1.316", host: offline.host }), []);
+  for (const document of [undefined, "not a list", { message: "API rate limit exceeded" }, new Error("boom")]) {
+    const { host } = fake({ documents: { [`${GITHUB}/git/matching-refs/tags/rust-v0.166.?per_page=100`]: document, [`${GITHUB}/releases/tags/rust-v0.166.0`]: document } });
+    assert.deepEqual(await runtimeReleaseNotes("codex", { from: "0.165.9", to: "0.166.0", host }), [], String(document));
+  }
+  const empty = fake({ documents: { [CHANGELOG]: "no sections in here" } });
+  assert.deepEqual(await runtimeReleaseNotes("claude", { from: "2.1.310", to: "2.1.316", host: empty.host }), []);
+
+  const untouched = fake({});
+  for (const [from, to] of [["0.164.0", "latest"], ["../x", "0.166.0"], ["0.166.0", "0.166.0"], ["0.166.0", "0.164.0"]]) {
+    assert.deepEqual(await runtimeReleaseNotes("codex", { from, to, host: untouched.host }), [], `${from} to ${to}`);
+  }
+  assert.equal(untouched.looked.length, 0, "a bad, equal or backwards range looks nothing up");
+});
+
+test("notes: a hung fetch stops at the timeout and gives no notes", async () => {
+  const hanging: Partial<RuntimeHost> = {
+    fetch: (_url, init) => new Promise((_resolve, reject) => init.signal.addEventListener("abort", () => reject(init.signal.reason))),
+  };
+  // The abort timer does not hold the process open on its own.
+  const alive = setInterval(() => {}, 1);
+  assert.deepEqual(await runtimeReleaseNotes("claude", { from: "2.1.310", to: "2.1.316", timeoutMs: 5, host: hanging }), []);
+  clearInterval(alive);
 });
 
 // The real host: real files, symlinks and processes, with a fake registry and a fake npm in a temp folder.

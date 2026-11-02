@@ -10,6 +10,7 @@
  * not when the installer exits 0.
  */
 
+import { query as sdkQuery, type SDKUserMessage } from "@anthropic-ai/claude-agent-sdk";
 import { execFile, type ExecFileException } from "node:child_process";
 import { constants } from "node:fs";
 import { access, open, readFile, realpath, stat } from "node:fs/promises";
@@ -18,7 +19,7 @@ import { tmpdir } from "node:os";
 import { delimiter, dirname, join, resolve } from "node:path";
 import { CODEX_PROTOCOL_VERSION, codexVersionIncompatibility } from "./codex/protocol/version.ts";
 import { CLAUDE_CODE_MIN_VERSION, checkMinimumVersion, compareVersions, parseRuntimeVersion } from "./compat.ts";
-import { RuntimeUpdateError } from "./errors.ts";
+import { AgentEngineError, RuntimeUpdateError } from "./errors.ts";
 import type {
   BundledClaude,
   ProviderId,
@@ -26,9 +27,11 @@ import type {
   RuntimeExecResult,
   RuntimeHost,
   RuntimeManager,
+  RuntimeReleaseNote,
   RuntimeUpdateOptions,
   RuntimeUpdateResult,
   RuntimeVersionStatus,
+  SharedClaude,
 } from "./types.ts";
 
 /** The runtimes this library can check and update. */
@@ -55,6 +58,15 @@ const VERSION_TIMEOUT_MS = 10_000;
 
 /** How long an installer may run: a native Claude Code is a large download. */
 const UPDATE_TIMEOUT_MS = 5 * 60_000;
+
+/** How long the Agent SDK may take to initialise on an updated binary. */
+const SESSION_TIMEOUT_MS = 30_000;
+
+/** How long one fetch of release notes may take. Claude's changelog is over a megabyte. */
+const NOTES_TIMEOUT_MS = 10_000;
+
+/** The most Codex minor versions read, newest first: each costs GitHub API calls, of about 60 an hour without a sign-in. */
+const MAX_NOTES_MINORS = 10;
 
 /** How much of an installer's output is kept. */
 const MAX_OUTPUT_CHARS = 16_000;
@@ -159,7 +171,39 @@ const REAL_HOST: RuntimeHost = {
     }
   },
   bundledClaude: readBundledClaude,
+  claudeSession: (binary, env) => claudeSessionVersion(sdkQuery, binary, env),
 };
+
+/**
+ * Opens an Agent SDK session on `binary` and returns the version it reports. The
+ * prompt stream stays empty and the session closes once it has initialised, so
+ * no model is called. No tools, MCP servers or settings load, and nothing is saved.
+ */
+export async function claudeSessionVersion(query: typeof sdkQuery, binary: string, env: Env): Promise<string | undefined> {
+  let closeInput = () => {};
+  const closed = new Promise<void>((done) => (closeInput = done));
+  const prompt = (async function* (): AsyncGenerator<SDKUserMessage> {
+    await closed;
+  })();
+  const session = query({
+    prompt,
+    options: { cwd: tmpdir(), env: { ...env }, pathToClaudeCodeExecutable: binary, settingSources: [], tools: [], strictMcpConfig: true, mcpServers: {}, persistSession: false },
+  });
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  try {
+    const init = await Promise.race([
+      session.initializationResult(),
+      new Promise<never>((_, reject) => {
+        timer = setTimeout(() => reject(new AgentEngineError("it did not initialise in time")), SESSION_TIMEOUT_MS);
+      }),
+    ]);
+    return init.claude_code_version;
+  } finally {
+    clearTimeout(timer);
+    closeInput();
+    session.close();
+  }
+}
 
 /** Reads the installed Agent SDK's pairing and finds its binary the way the SDK does. */
 async function readBundledClaude(): Promise<BundledClaude | undefined> {
@@ -198,7 +242,7 @@ async function locate(command: string, env: Env, host: RuntimeHost): Promise<str
   for (const folder of (env.PATH ?? env.Path ?? "").split(delimiter)) {
     if (!folder) continue;
     for (const name of names) {
-      const path = join(folder, name);
+      const path = resolve(folder, name);
       if (await host.isExecutable(path)) return path;
     }
   }
@@ -214,16 +258,20 @@ async function readVersion(binary: string, name: string, env: Env, host: Runtime
   return { problem: `The ${name} version could not be read: ${detail}` };
 }
 
-/** Fetches a registry document. Any failure means "unknown": being offline is normal. */
-async function fetchDocument(url: string, timeoutMs: number, host: RuntimeHost): Promise<Record<string, unknown> | undefined> {
+/** Fetches a fixed URL with a timeout, and nothing but an accept header. Any failure means "unknown": being offline is normal. */
+async function fetchBody<T>(url: string, accept: string, timeoutMs: number, host: RuntimeHost, read: (response: { json(): Promise<unknown>; text(): Promise<string> }) => Promise<T>): Promise<T | undefined> {
   try {
-    const response = await host.fetch(url, { signal: AbortSignal.timeout(timeoutMs), headers: { accept: "application/json" } });
-    if (!response.ok) return undefined;
-    const body = await response.json();
-    return body && typeof body === "object" ? (body as Record<string, unknown>) : undefined;
+    const response = await host.fetch(url, { signal: AbortSignal.timeout(timeoutMs), headers: { accept } });
+    return response.ok ? await read(response) : undefined;
   } catch {
     return undefined;
   }
+}
+
+/** Fetches a registry document. */
+async function fetchDocument(url: string, timeoutMs: number, host: RuntimeHost): Promise<Record<string, unknown> | undefined> {
+  const body = await fetchBody(url, "application/json", timeoutMs, host, (response) => response.json());
+  return body && typeof body === "object" ? (body as Record<string, unknown>) : undefined;
 }
 
 /** What has been published, from the channel the owner installs from. */
@@ -459,6 +507,28 @@ function hostFrom(replacement: Partial<RuntimeHost> | undefined): RuntimeHost {
 }
 
 /**
+ * The `claude` on PATH, for an app that wants the install the terminal uses:
+ * pass `path` as the engine's `executable`. Undefined when it is missing, does not
+ * run or is older than the minimum, so the app can fall back to the bundled copy.
+ * Give `env` a fuller PATH if the app starts with a thin one, as under launchd.
+ */
+export async function findSharedClaude(options: Pick<RuntimeTarget, "env" | "minimumVersion"> & Pick<RuntimeCheckOptions, "host"> = {}): Promise<SharedClaude | undefined> {
+  const host = hostFrom(options.host);
+  const env = options.env ?? process.env;
+  const path = await locate(SPECS.claude.command, env, host);
+  if (!path) return undefined;
+  const { version } = await readVersion(path, SPECS.claude.name, env, host);
+  if (!version || incompatibility("claude", version, options.minimumVersion)) return undefined;
+  return { path, version };
+}
+
+/** The installed Agent SDK that drives Claude, whichever binary it runs. */
+async function sdkReport(found: Inspection, latest: string | undefined, host: RuntimeHost): Promise<RuntimeVersionStatus["sdk"]> {
+  const sdk = found.bundled ?? (await host.bundledClaude());
+  return sdk ? { version: sdk.sdkVersion, claudeCode: sdk.claudeCodeVersion, latest } : undefined;
+}
+
+/**
  * Reports a runtime's status without starting a turn or an app-server. The only
  * process it starts is `<binary> --version`. A missing runtime or a failed lookup
  * is a field in the result, not an exception.
@@ -467,7 +537,9 @@ export async function runtimeVersion(provider: ManagedProvider, options: Runtime
   const host = hostFrom(options.host);
   const spec = SPECS[provider];
   const found = await inspect(provider, options, host);
-  const published = await found.owner.lookup(options.lookupTimeoutMs ?? LOOKUP_TIMEOUT_MS);
+  const timeoutMs = options.lookupTimeoutMs ?? LOOKUP_TIMEOUT_MS;
+  // A bundled Claude's own lookup already reads the SDK's latest.
+  const [published, sdkPublished] = await Promise.all([found.owner.lookup(timeoutMs), provider === "claude" && found.owner.managedBy !== "bundled" ? sdkLatest(timeoutMs, host) : undefined]);
   const { version } = found;
   const { latest } = published;
   const installedProblem = version ? incompatibility(provider, version, options.minimumVersion) : undefined;
@@ -501,7 +573,7 @@ export async function runtimeVersion(provider: ManagedProvider, options: Runtime
     updateOffered,
     updateCommand: installer && latest ? installer.command(latest).argv : undefined,
     reason,
-    sdk: found.bundled ? { version: found.bundled.sdkVersion, latest: published.sdkLatest } : undefined,
+    sdk: provider === "claude" ? await sdkReport(found, (sdkPublished ?? published).sdkLatest, host) : undefined,
     checkedAt: new Date(),
   };
 }
@@ -571,7 +643,103 @@ async function verifyUpdate(
   }
   const refused = incompatibility(provider, to, options.minimumVersion);
   if (refused) throw new RuntimeUpdateError("incompatible-result", `${spec.name} is now ${to}, which this library would refuse to run: ${refused}`, details);
+  if (provider === "claude") await checkSdkSession(binary, to, options, host, details);
   return { provider, outcome: "updated", from, to, managedBy: owner.managedBy, path: await host.realpath(binary).catch(() => binary), command: argv, output };
+}
+
+/** The app runs Claude through the Agent SDK, not by `--version`, so the SDK has to accept the new binary too. */
+async function checkSdkSession(binary: string, to: string, options: RuntimeTarget, host: RuntimeHost, details: ConstructorParameters<typeof RuntimeUpdateError>[2]): Promise<void> {
+  let reported: string | undefined;
+  try {
+    reported = await host.claudeSession(binary, options.env ?? process.env);
+  } catch (error) {
+    throw new RuntimeUpdateError("sdk-check-failed", `Claude Code is now ${to}, but the Agent SDK could not open a session on it: ${error instanceof Error ? error.message : String(error)}`, details);
+  }
+  if (reported !== to) {
+    throw new RuntimeUpdateError("sdk-check-failed", `Claude Code reports ${to}, but a session through the Agent SDK reports ${reported ?? "no version"}.`, details);
+  }
+}
+
+/** A published text without its Markdown, for showing as it is or handing on. */
+function plainText(markdown: string): string {
+  return markdown
+    .replace(/\r\n/gu, "\n")
+    .replace(/^```.*\n?/gmu, "")
+    .replace(/^#{1,6}\s+/gmu, "")
+    .replace(/!?\[([^\]]*)\]\([^)]*\)/gu, "$1")
+    .replace(/\*\*|`/gu, "")
+    .trim();
+}
+
+/** Keeps the notes for versions after `from`, up to and including `to`, newest first. */
+function notesBetween(notes: readonly RuntimeReleaseNote[], from: string, to: string): RuntimeReleaseNote[] {
+  return notes
+    .filter((note) => note.text && isNewer(note.version, from) && !isNewer(note.version, to))
+    .sort((left, right) => (isNewer(left.version, right.version) ? -1 : isNewer(right.version, left.version) ? 1 : 0));
+}
+
+/** Fetches one GitHub API document. */
+function githubJson(path: string, timeoutMs: number, host: RuntimeHost): Promise<unknown> {
+  return fetchBody(`https://api.github.com/repos/openai/codex/${path}`, "application/vnd.github+json", timeoutMs, host, (response) => response.json());
+}
+
+/**
+ * Which Codex versions to read notes for: its release tags in the range, with `to`
+ * always among them. The tags are read minor by minor, because the list of
+ * releases carries every release's assets and runs to tens of megabytes a page.
+ */
+async function codexVersionsBetween(from: string, to: string, timeoutMs: number, host: RuntimeHost): Promise<string[]> {
+  const [fromMajor, fromMinor] = parseRuntimeVersion(from) as readonly [number, number, number];
+  const [toMajor, toMinor] = parseRuntimeVersion(to) as readonly [number, number, number];
+  if (fromMajor !== toMajor) return [to];
+  const minors = Array.from({ length: Math.min(toMinor - fromMinor + 1, MAX_NOTES_MINORS) }, (_, index) => toMinor - index);
+  const lists = await Promise.all(minors.map((minor) => githubJson(`git/matching-refs/tags/rust-v${toMajor}.${minor}.?per_page=100`, timeoutMs, host)));
+  const tagged = lists.flatMap((refs) => (Array.isArray(refs) ? (refs as Array<{ ref?: unknown } | null>) : []))
+    .map((entry) => (typeof entry?.ref === "string" ? strict(entry.ref.replace(/^refs\/tags\/rust-v/u, "")) : undefined))
+    .filter((version): version is string => version !== undefined && !version.includes("-"));
+  return [...new Set([to, ...tagged])].filter((version) => isNewer(version, from) && !isNewer(version, to));
+}
+
+/** Codex's GitHub releases. Prereleases are skipped unless one is what the update went to. */
+async function codexNotes(from: string, to: string, timeoutMs: number, host: RuntimeHost): Promise<RuntimeReleaseNote[]> {
+  const versions = await codexVersionsBetween(from, to, timeoutMs, host);
+  const notes = await Promise.all(
+    versions.map(async (version) => {
+      const release = (await githubJson(`releases/tags/rust-v${version}`, timeoutMs, host)) as { body?: unknown; draft?: unknown } | null | undefined;
+      return typeof release?.body === "string" && release.draft !== true ? { version, text: plainText(release.body) } : undefined;
+    }),
+  );
+  return notes.filter((note) => note !== undefined);
+}
+
+/** The sections of Claude Code's changelog. Not every version has one. */
+async function claudeNotes(timeoutMs: number, host: RuntimeHost): Promise<RuntimeReleaseNote[]> {
+  const url = "https://raw.githubusercontent.com/anthropics/claude-code/main/CHANGELOG.md";
+  const changelog = await fetchBody(url, "text/plain", timeoutMs, host, (response) => response.text());
+  if (typeof changelog !== "string") return [];
+  const notes: RuntimeReleaseNote[] = [];
+  // `^## ` splits the file at each section; what comes before the first is the title.
+  for (const section of changelog.replace(/\r\n/gu, "\n").split(/^(?=## )/mu)) {
+    const heading = section.match(/^## (\S+).*\n?/u);
+    const version = strict(heading?.[1]);
+    if (heading && version) notes.push({ version, text: plainText(section.slice(heading[0].length)) });
+  }
+  return notes;
+}
+
+/**
+ * What a project published for the versions after `from`, up to and including
+ * `to`, newest first and one entry per version that has notes. Any failure, bad
+ * version included, gives fewer notes or none, never an error: notes are a nicety.
+ * Codex's come from its GitHub releases, Claude Code's from its changelog.
+ * Unsummarised, and text from outside: treat it as data, not instructions.
+ */
+export async function runtimeReleaseNotes(provider: ManagedProvider, options: { from: string; to: string; timeoutMs?: number; host?: Partial<RuntimeHost> }): Promise<RuntimeReleaseNote[]> {
+  const { from, to } = options;
+  if (!isStrictSemver(from) || !isStrictSemver(to) || !isNewer(to, from)) return [];
+  const host = hostFrom(options.host);
+  const timeoutMs = options.timeoutMs ?? NOTES_TIMEOUT_MS;
+  return notesBetween(provider === "codex" ? await codexNotes(from, to, timeoutMs, host) : await claudeNotes(timeoutMs, host), from, to);
 }
 
 /**

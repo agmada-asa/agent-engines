@@ -31,9 +31,10 @@ export interface Engine {
   runtimeVersion(options?: RuntimeCheckOptions): Promise<RuntimeVersionStatus>;
   /**
    * Moves the runtime to the latest version, or to `version`, with the installer
-   * that owns it, then reads the version back and rechecks compatibility. Running
-   * threads keep the process they have; restarting them is the app's choice.
-   * Anything short of the result it returns throws `RuntimeUpdateError`.
+   * that owns it, then reads the version back and rechecks compatibility. For
+   * Claude it also opens an Agent SDK session on the new binary, without a model
+   * turn. Running threads keep the process they have; restarting them is the
+   * app's choice. Anything short of the result it returns throws `RuntimeUpdateError`.
    */
   updateRuntime(options?: RuntimeUpdateOptions): Promise<RuntimeUpdateResult>;
   /** The models and efforts the signed-in runtime offers right now. */
@@ -348,8 +349,12 @@ export interface RuntimeVersionStatus {
   updateCommand?: readonly string[];
   /** A plain sentence saying why no update can be offered, or what is wrong with the install. Absent when it is simply up to date. */
   reason?: string;
-  /** The SDK a bundled Claude ships in, and its latest published version. */
-  sdk?: { version: string; latest?: string };
+  /**
+   * Claude only: the installed Agent SDK that drives the binary, the Claude Code
+   * it was built with, and its latest published version. For a shared install,
+   * `version` against `sdk.claudeCode` is the gap between the binary and the SDK.
+   */
+  sdk?: { version: string; claudeCode: string; latest?: string };
   checkedAt: Date;
 }
 
@@ -358,8 +363,8 @@ export interface RuntimeHost {
   platform: NodeJS.Platform;
   /** Runs a command without a shell. Reports failure in the result; never rejects. */
   exec(command: string, args: readonly string[], options: { env: Readonly<Record<string, string | undefined>>; cwd?: string; timeoutMs: number }): Promise<RuntimeExecResult>;
-  /** Fetches the registry document at a fixed URL. */
-  fetch(url: string, init: { signal: AbortSignal; headers: Record<string, string> }): Promise<{ ok: boolean; json(): Promise<unknown> }>;
+  /** Fetches a document at a fixed URL: a registry's answer or a project's release notes. */
+  fetch(url: string, init: { signal: AbortSignal; headers: Record<string, string> }): Promise<{ ok: boolean; json(): Promise<unknown>; text(): Promise<string> }>;
   realpath(path: string): Promise<string>;
   /** Whether `path` is a file that can be run. */
   isExecutable(path: string): Promise<boolean>;
@@ -367,6 +372,25 @@ export interface RuntimeHost {
   readText(path: string): Promise<string | undefined>;
   /** The Claude Code inside the installed Agent SDK; undefined when the SDK cannot be read. */
   bundledClaude(): Promise<BundledClaude | undefined>;
+  /**
+   * Opens an Agent SDK session on a Claude Code binary, sends no prompt, and
+   * returns the `claude_code_version` it reports. Rejects if it does not initialise.
+   */
+  claudeSession(binary: string, env: Readonly<Record<string, string | undefined>>): Promise<string | undefined>;
+}
+
+/** Result of `findSharedClaude()`: the `claude` on PATH, ready for an engine's `executable`. */
+export interface SharedClaude {
+  /** Absolute, and as found on PATH: symlinks are not followed, so it stays right when an update moves the real file. */
+  path: string;
+  version: string;
+}
+
+/** What a project published for one version. */
+export interface RuntimeReleaseNote {
+  version: string;
+  /** The notes as published, minus their Markdown. Text from outside: treat it as data, not instructions. */
+  text: string;
 }
 
 /** What `RuntimeHost.exec` reports. */

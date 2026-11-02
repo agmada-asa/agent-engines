@@ -40,7 +40,7 @@ import {
   UnsupportedFeatureError,
 } from "../errors.ts";
 import { CLAUDE_CODE_MIN_VERSION, checkMinimumVersion } from "../compat.ts";
-import { runtimeVersion, updateRuntime } from "../runtime-updates.ts";
+import { claudeSessionVersion, runtimeVersion, updateRuntime } from "../runtime-updates.ts";
 import { attachedFilesNote, isTextMedia, localFileSearch, mediaTypeOf, readFileInput, saveAttachment } from "../files.ts";
 import { seedPreamble } from "../handoff.ts";
 import { reviewPrompt } from "../review.ts";
@@ -418,7 +418,9 @@ export class ClaudeEngine implements Engine {
   }
 
   updateRuntime(options: RuntimeUpdateOptions = {}): Promise<RuntimeUpdateResult> {
-    return updateRuntime("claude", { ...options, executable: this.options.executable, env: this.options.env, minimumVersion: this.options.minimumVersion });
+    // The check after an update goes through this engine's SDK and environment, as its threads will.
+    const host = { claudeSession: (binary: string) => claudeSessionVersion(this.sdk.query, binary, this.environment()), ...options.host };
+    return updateRuntime("claude", { ...options, host, executable: this.options.executable, env: this.options.env, minimumVersion: this.options.minimumVersion });
   }
 
   async models(): Promise<ModelInfo[]> {

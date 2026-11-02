@@ -21,7 +21,9 @@ export class RuntimeCompatibilityError extends AgentEngineError {}
 /**
  * Why a runtime update did not finish. Before anything ran: `invalid-version`,
  * `not-updatable`, `lookup-failed`, `incompatible-target`, `in-progress`. After
- * the installer ran: `installer-failed`, `version-mismatch`, `incompatible-result`.
+ * the installer ran: `installer-failed`, `version-mismatch`, `incompatible-result`,
+ * and for Claude `sdk-check-failed`: the binary is in place, but the Agent SDK
+ * could not open a session on it or the session reported another version.
  */
 export type RuntimeUpdateFailure =
   | "invalid-version"
@@ -31,7 +33,8 @@ export type RuntimeUpdateFailure =
   | "in-progress"
   | "installer-failed"
   | "version-mismatch"
-  | "incompatible-result";
+  | "incompatible-result"
+  | "sdk-check-failed";
 
 /**
  * A runtime update that did not finish. `from` is the version to roll back to,
