@@ -161,6 +161,8 @@ export class ClaudeNormalizer {
   private readonly taskByToolUse = new Map<string, string>();
   private readonly subagents = new Set<string>();
   private readonly endedSubagents = new Set<string>();
+  /** Latest run of each subagent; SDK run IDs sort in the order the runs opened. */
+  private readonly subagentRuns = new Map<string, string>();
   /** The model each agent last answered on, by subagent ID ("" for the main agent), so `model.confirmed` is sent only on a change. */
   private readonly confirmedModels = new Map<string, string>();
   /** Non-agent tasks seen so far → the subagent that launched each, if any; and those that have ended. */
@@ -314,13 +316,23 @@ export class ClaudeNormalizer {
   }
 
   private system(m: Json, base: { threadId: string; turnId: string }): AgentEvent[] {
+    const runId = typeof m.run_id === "string" ? m.run_id : undefined;
+    const previousRun = this.subagentRuns.get(String(m.task_id));
+    // Late progress, status and completion frames must not change the new run.
+    if (runId !== undefined && previousRun !== undefined && runId < previousRun
+      && ["task_started", "task_progress", "task_updated", "task_notification"].includes(m.subtype)) return [];
     switch (m.subtype) {
       case "task_started": {
         const id = String(m.task_id);
         // Shell and monitor tasks are tasks too; only agents are subagents.
         if (m.task_type && m.task_type !== "local_agent" && !m.subagent_type) return this.taskStarted(m, base, id);
+        // A replay of an ended run is not more work. Older SDKs have no run ID.
+        if (runId !== undefined && previousRun !== undefined && runId === previousRun) return [];
+        const newRun = runId !== undefined && previousRun !== undefined && runId > previousRun;
+        if (this.subagents.has(id) && !this.endedSubagents.has(id) && !newRun) return [];
+        this.endedSubagents.delete(id);
+        if (runId !== undefined) this.subagentRuns.set(id, runId);
         if (typeof m.tool_use_id === "string") this.taskByToolUse.set(m.tool_use_id, id);
-        if (this.subagents.has(id)) return [];
         this.subagents.add(id);
         this.taskInfo.set(id, { id, kind: "subagent", description: String(m.description ?? ""), status: "running" });
         return [{
