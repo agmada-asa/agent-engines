@@ -83,6 +83,23 @@ test("file changes carry unified hunks: edits from the patch, notebooks without 
   assert.deepEqual(inner[1], { threadId: S, turnId: "t", agentId: "agent-1", type: "file.changed", itemId: "sw", changes: [{ path: "/tmp/b.md", kind: "add", diff: "@@ -0,0 +1,1 @@\n+hi" }] });
 });
 
+test("model.confirmed: from each agent's own messages, once per model, skipping synthetic ones", () => {
+  const n = new ClaudeNormalizer(S);
+  const confirmed = (message: Record<string, unknown>) => n.normalize(msg({ type: "assistant", parent_tool_use_id: null, ...message }), "t").filter((event) => event.type === "model.confirmed");
+  assert.deepEqual(confirmed({ message: { id: "a", model: "claude-opus-x", content: [] } }), [{ threadId: S, turnId: "t", type: "model.confirmed", model: "claude-opus-x" }]);
+  assert.deepEqual(confirmed({ message: { id: "b", model: "claude-opus-x", content: [] } }), []);
+  assert.deepEqual(confirmed({ message: { id: "c", model: "<synthetic>", content: [] } }), []);
+  assert.deepEqual(confirmed({ message: { id: "d", content: [] } }), []);
+
+  n.normalize(msg({ type: "system", subtype: "task_started", task_id: "agent-1", tool_use_id: "call-1", description: "Look", task_type: "local_agent" }), "t");
+  const subagent = { parent_tool_use_id: "call-1", message: { id: "e", model: "claude-haiku-x", content: [] } };
+  assert.deepEqual(confirmed(subagent), [{ threadId: S, turnId: "t", agentId: "agent-1", type: "model.confirmed", model: "claude-haiku-x" }]);
+  assert.deepEqual(confirmed(subagent), []);
+  // A later fallback onto another model is reported, and the main agent's own record is untouched.
+  assert.deepEqual(confirmed({ parent_tool_use_id: "call-1", message: { id: "f", model: "claude-sonnet-x", content: [] } }).map((event) => (event as { model: string }).model), ["claude-sonnet-x"]);
+  assert.deepEqual(confirmed({ message: { id: "g", model: "claude-opus-x", content: [] } }), []);
+});
+
 test("subagents: task events and their messages tagged with the task ID", () => {
   const n = new ClaudeNormalizer(S);
   n.normalize(msg({ type: "assistant", parent_tool_use_id: null, message: { id: "m", content: [{ type: "tool_use", id: "task-tool", name: "Agent", input: { prompt: "Look" } }] } }), "t");

@@ -61,3 +61,31 @@ test("Claude: plan mode, structured output, history, rename, fork, rewind with f
     (line) => t.diagnostic(line),
   );
 });
+
+test("Claude: a subagent's real model is confirmed from its own messages", { skip: !LIVE && "set AGENT_ENGINES_LIVE=1", timeout: 180_000 }, async (t) => {
+  const engine = new ClaudeEngine();
+  const cwd = await mkdtemp(join(tmpdir(), "agent-engines-live-claude-"));
+  let threadId: string | undefined;
+  try {
+    const thread = await engine.startThread({
+      cwd, model: MODEL, effort: "low", access: "full", mcpServers: {},
+      agents: { replier: { description: "Replies with one word.", prompt: "Reply with the single word: done.", model: "sonnet" } },
+      claude: { settingSources: [], strictMcpConfig: true, skills: [] },
+    });
+    threadId = thread.id;
+    const subagents = new Set<string>();
+    const confirmed: { agentId?: string; model: string }[] = [];
+    for await (const event of thread.run("Use the Agent tool with subagent_type \"replier\" and the prompt \"Go\". Then reply with its word.")) {
+      if (event.type === "subagent.started") subagents.add(event.subagentId);
+      if (event.type === "model.confirmed") confirmed.push({ agentId: event.agentId, model: event.model });
+    }
+    t.diagnostic(JSON.stringify(confirmed));
+    assert.ok(subagents.size > 0, "the subagent started");
+    assert.ok(confirmed.some((entry) => !entry.agentId && entry.model.includes("haiku")), "the main agent is confirmed on its own model");
+    assert.ok(confirmed.some((entry) => entry.agentId && subagents.has(entry.agentId) && entry.model.includes("sonnet")), "the subagent is confirmed on sonnet, by its subagent ID");
+  } finally {
+    if (threadId) await engine.deleteThread(threadId, { cwd }).catch(() => undefined);
+    await engine.close();
+    await rm(cwd, { recursive: true, force: true });
+  }
+});

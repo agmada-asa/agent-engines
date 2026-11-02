@@ -120,7 +120,7 @@ Anything runtime-specific goes in `codex: {…}` (approval policy, approvals rev
 
 ### Events
 
-`turn.started`, `text.delta` / `text.done`, `reasoning.delta` / `reasoning.done`, `tool.started` / `tool.output.delta` / `tool.progress` / `tool.completed`, `file.changed`, `diff.updated`, `plan.updated`, `plan.proposal.delta` / `plan.proposal.done`, `status`, `task.started` / `task.progress` / `task.ended`, `subagent.started` / `subagent.ended`, `request` / `request.resolved`, `usage`, `rate-limit`, `compacted`, `model.rerouted`, `notice`, `hook.started` / `hook.completed`, `goal.updated`, `mcp.status`, `thread.renamed`, `prompt.suggestion`, `realtime.*`, `turn.completed`, `turn.failed`.
+`turn.started`, `text.delta` / `text.done`, `reasoning.delta` / `reasoning.done`, `tool.started` / `tool.output.delta` / `tool.progress` / `tool.completed`, `file.changed`, `diff.updated`, `plan.updated`, `plan.proposal.delta` / `plan.proposal.done`, `status`, `task.started` / `task.progress` / `task.ended`, `subagent.started` / `subagent.ended`, `request` / `request.resolved`, `usage`, `rate-limit`, `compacted`, `model.rerouted`, `model.confirmed`, `notice`, `hook.started` / `hook.completed`, `goal.updated`, `mcp.status`, `thread.renamed`, `prompt.suggestion`, `realtime.*`, `turn.completed`, `turn.failed`.
 
 `engine.subscribe()` gets the events that belong to no thread: `account.changed` and `notice` (a config warning, a deprecation).
 
@@ -158,6 +158,7 @@ Limits worth knowing:
 - `status` is a hint for a status line, not a turn lifecycle; use `turn.completed` and `turn.failed` for that. A Codex `idle` usually arrives after `turn.completed`, so it reaches `thread.subscribe` but not the turn's iterator.
 - Claude reports `idle` and `waiting` only through session-state events, which the SDK sends when a session opts in. The engine does not opt in, so from Claude expect `working`, `compacting` and `retrying`; a pending `request` is the sign it is waiting.
 - `retrying` means the runtime will try the model request again; the turn has not failed.
+- `model.confirmed` is Claude only: the model that actually answered, read from the agent's own messages, with `agentId` set for a subagent. `subagent.started` has no `model` from Claude, because the SDK doesn't report one when a subagent starts. Codex's `model` there is what the runtime reports at the start, not a confirmation from the subagent's messages.
 - A task a subagent launched carries that subagent's `agentId`. `task.ended` needs the `task.started` from the same thread handle, so a task begun before a resume does not end on the new handle.
 
 Codex marks each agent message's `phase` on `text.delta` and `text.done`: `commentary` for a progress note between tool calls, `answer` for the reply. Claude's text events have no phase. A turn's result text is never a progress note.

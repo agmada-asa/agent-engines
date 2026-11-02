@@ -161,6 +161,8 @@ export class ClaudeNormalizer {
   private readonly taskByToolUse = new Map<string, string>();
   private readonly subagents = new Set<string>();
   private readonly endedSubagents = new Set<string>();
+  /** The model each agent last answered on, by subagent ID ("" for the main agent), so `model.confirmed` is sent only on a change. */
+  private readonly confirmedModels = new Map<string, string>();
   /** Non-agent tasks seen so far → the subagent that launched each, if any; and those that have ended. */
   private readonly tasks = new Map<string, string | undefined>();
   private readonly endedTasks = new Set<string>();
@@ -264,6 +266,14 @@ export class ClaudeNormalizer {
     const message = record(m.message) ?? {};
     const messageId = String(message.id ?? m.uuid ?? "");
     const events: AgentEvent[] = [];
+    // Claude Code stamps messages it writes itself (API errors, for one) "<synthetic>"; no model answered those.
+    if (typeof message.model === "string" && message.model && !message.model.startsWith("<")) {
+      const agent = base.agentId ?? "";
+      if (this.confirmedModels.get(agent) !== message.model) {
+        this.confirmedModels.set(agent, message.model);
+        events.push({ ...base, type: "model.confirmed", model: message.model });
+      }
+    }
     for (const block of Array.isArray(message.content) ? message.content : []) {
       if (block?.type === "text" && typeof block.text === "string") {
         events.push({ ...base, type: "text.done", itemId: this.itemId(this.wholeCounts, messageId, "text"), text: block.text });

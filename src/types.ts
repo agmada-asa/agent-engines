@@ -940,6 +940,11 @@ export type AgentEvent = EventBase &
     | { type: "rate-limit"; limit: RateLimit }
     | { type: "compacted"; beforeTokens?: number; afterTokens?: number }
     | { type: "model.rerouted"; from: string; to: string }
+    /**
+     * The model that actually answered, read from the agent's own messages (Claude). Sent the first
+     * time an agent answers and again if its model changes; `agentId` is set for a subagent.
+     */
+    | { type: "model.confirmed"; model: string }
     /** Something the runtime wants the user to know that is not part of the reply: a warning, a refusal, a denied tool. */
     | { type: "notice"; kind: NoticeKind; message: string; details?: string; raw?: unknown }
     /** A hook (the user's, a project's, a plugin's or the host's) started or finished. */
