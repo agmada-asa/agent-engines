@@ -11,6 +11,9 @@
 import { readFile } from "node:fs/promises";
 import { join } from "node:path";
 
+/** Oldest Claude Code this library has been checked against. */
+export const CLAUDE_CODE_MIN_VERSION = "2.1.248";
+
 /**
  * Explains why `version` is older than `minimum`, or returns undefined when it
  * is recent enough. Compares the first `major.minor.patch` in each string.

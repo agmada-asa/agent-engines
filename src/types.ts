@@ -23,6 +23,19 @@ export interface Engine {
   availability(): Promise<Availability>;
   /** What this runtime can do, for showing only the controls that work. */
   capabilities(): Promise<Capabilities>;
+  /**
+   * The installed version, the latest published one, who manages the binary and
+   * whether an update can be offered. Starts no turn and no app-server. Never
+   * throws for a missing runtime or a failed network lookup.
+   */
+  runtimeVersion(options?: RuntimeCheckOptions): Promise<RuntimeVersionStatus>;
+  /**
+   * Moves the runtime to the latest version, or to `version`, with the installer
+   * that owns it, then reads the version back and rechecks compatibility. Running
+   * threads keep the process they have; restarting them is the app's choice.
+   * Anything short of the result it returns throws `RuntimeUpdateError`.
+   */
+  updateRuntime(options?: RuntimeUpdateOptions): Promise<RuntimeUpdateResult>;
   /** The models and efforts the signed-in runtime offers right now. */
   models(): Promise<ModelInfo[]>;
   /**
@@ -140,6 +153,8 @@ export interface Capabilities {
   stopTask: boolean;
   /** Live MCP management on a thread. */
   mcp: { setServers: boolean; reconnect: boolean; toggle: boolean; login: boolean; readResource: boolean };
+  /** `Engine.updateRuntime`. Whether this install can be moved is `RuntimeVersionStatus.canUpdate`. */
+  runtimeUpdate: boolean;
   /** `Engine.login`. */
   login: boolean;
   /** `Engine.logout`. */
@@ -292,6 +307,117 @@ export interface Availability {
   version?: string;
   /** Account, when signed in: plan type and email only, never credentials. */
   account?: { kind: "subscription" | "api-key" | "other"; plan?: string; email?: string };
+}
+
+/**
+ * Who owns a runtime's binary: a package manager's global install, Homebrew, the
+ * CLI's own updater, the copy inside the Claude Agent SDK, or none this library
+ * can tell.
+ */
+export type RuntimeManager = "npm" | "pnpm" | "bun" | "homebrew" | "self" | "bundled" | "unknown";
+
+/** Result of `Engine.runtimeVersion()`. */
+export interface RuntimeVersionStatus {
+  provider: ProviderId;
+  /** Whether the binary this engine would run is there. */
+  installed: boolean;
+  /** Installed version; undefined when it is missing or could not be read. */
+  version?: string;
+  /** Latest published version on the channel the owner installs from; undefined when the lookup failed. A bundled Claude reports the Claude Code the latest SDK pairs with. */
+  latest?: string;
+  /** The binary, with symlinks resolved. */
+  path?: string;
+  managedBy: RuntimeManager;
+  /** Whether this library would run the installed version; undefined when the version is unknown. */
+  compatible?: boolean;
+  /** Why it would not. */
+  incompatibility?: string;
+  /** Whether this library would run `latest`; undefined when `latest` is unknown. */
+  latestCompatible?: boolean;
+  /** Why it would not. */
+  latestIncompatibility?: string;
+  /** `latest` is newer than `version`, whether or not this library can move to it. */
+  newerAvailable: boolean;
+  /** This library knows the installer and can run it. */
+  canUpdate: boolean;
+  /** `updateRuntime({ version })` can go to an exact version, so to a previous one. Homebrew and Codex's own updater only go to their latest. */
+  canPinVersion: boolean;
+  /** The one to show "Update now" on: a newer version (or an unreadable install), an installer to run, and a target the engine would accept. */
+  updateOffered: boolean;
+  /** The command an update to `latest` runs, for showing or logging. */
+  updateCommand?: readonly string[];
+  /** A plain sentence saying why no update can be offered, or what is wrong with the install. Absent when it is simply up to date. */
+  reason?: string;
+  /** The SDK a bundled Claude ships in, and its latest published version. */
+  sdk?: { version: string; latest?: string };
+  checkedAt: Date;
+}
+
+/** What a runtime check touches, so tests can replace it. Each part defaults to the real one. */
+export interface RuntimeHost {
+  platform: NodeJS.Platform;
+  /** Runs a command without a shell. Reports failure in the result; never rejects. */
+  exec(command: string, args: readonly string[], options: { env: Readonly<Record<string, string | undefined>>; cwd?: string; timeoutMs: number }): Promise<RuntimeExecResult>;
+  /** Fetches the registry document at a fixed URL. */
+  fetch(url: string, init: { signal: AbortSignal; headers: Record<string, string> }): Promise<{ ok: boolean; json(): Promise<unknown> }>;
+  realpath(path: string): Promise<string>;
+  /** Whether `path` is a file that can be run. */
+  isExecutable(path: string): Promise<boolean>;
+  /** The start of a text file, enough to recognise a launcher script; undefined when it cannot be read. */
+  readText(path: string): Promise<string | undefined>;
+  /** The Claude Code inside the installed Agent SDK; undefined when the SDK cannot be read. */
+  bundledClaude(): Promise<BundledClaude | undefined>;
+}
+
+/** What `RuntimeHost.exec` reports. */
+export interface RuntimeExecResult {
+  /** Null when the process did not exit by itself. */
+  exitCode: number | null;
+  stdout: string;
+  stderr: string;
+  /** Why it could not start, or that it timed out. */
+  error?: string;
+}
+
+/** The Claude Code an Agent SDK ships. */
+export interface BundledClaude {
+  sdkVersion: string;
+  claudeCodeVersion: string;
+  /** The binary for this platform, when its package is installed. */
+  path?: string;
+}
+
+/** Options for `Engine.runtimeVersion()`. */
+export interface RuntimeCheckOptions {
+  /** How long the latest-version lookup may take; defaults to 5 seconds. */
+  lookupTimeoutMs?: number;
+  /** Replaces parts of what the check touches. */
+  host?: Partial<RuntimeHost>;
+}
+
+/** Options for `Engine.updateRuntime()`. */
+export interface RuntimeUpdateOptions extends RuntimeCheckOptions {
+  /** Exact version to move to, for a rollback; strict `major.minor.patch[-prerelease]`. Defaults to the latest. */
+  version?: string;
+  /** How long the installer may run; defaults to 5 minutes. */
+  timeoutMs?: number;
+}
+
+/** A finished update. Every other ending throws `RuntimeUpdateError`. */
+export interface RuntimeUpdateResult {
+  provider: ProviderId;
+  /** `up-to-date` means nothing ran: the runtime was already there. */
+  outcome: "updated" | "up-to-date";
+  /** The version before; undefined when it could not be read. */
+  from?: string;
+  /** The version read back from the binary afterwards. */
+  to: string;
+  managedBy: RuntimeManager;
+  /** The binary, with symlinks resolved. A versioned install moves. */
+  path: string;
+  /** The command that ran, and the end of what it printed. */
+  command?: readonly string[];
+  output?: string;
 }
 
 /** One model offered by a runtime's own catalogue. */

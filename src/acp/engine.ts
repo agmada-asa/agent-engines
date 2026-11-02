@@ -16,6 +16,7 @@ import { AgentEngineError, RuntimeConnectionError, SteerRejectedError, Unsupport
 import { isTextMedia, localFileSearch, readFileInput } from "../files.ts";
 import { seedPreamble } from "../handoff.ts";
 import { reviewPrompt } from "../review.ts";
+import { acpRuntimeVersion } from "../runtime-updates.ts";
 import { TurnHandle, emitTo, inputParts, prefixInput } from "../turn.ts";
 import type {
   AgentEvent,
@@ -39,6 +40,10 @@ import type {
   McpServer,
   McpServerState,
   ModelInfo,
+  RuntimeCheckOptions,
+  RuntimeUpdateOptions,
+  RuntimeUpdateResult,
+  RuntimeVersionStatus,
   PluginInfo,
   PortableTranscript,
   RealtimeSession,
@@ -202,6 +207,7 @@ export class AcpEngine implements Engine {
       listTasks: false,
       stopTask: false,
       mcp: { setServers: false, reconnect: false, toggle: false, login: false, readResource: false },
+      runtimeUpdate: false,
       login: false,
       logout: record(agent.auth)?.logout != null,
       hookEvents: false,
@@ -223,6 +229,15 @@ export class AcpEngine implements Engine {
   /** The agent's models, read from a session's model option. Opens a session in a temporary folder when no thread is open. */
   async models(): Promise<ModelInfo[]> {
     return (await this.probe()).models;
+  }
+
+  /** Whether the agent's command is there, without starting it. A version shows only once it has started and said. */
+  runtimeVersion(options: RuntimeCheckOptions = {}): Promise<RuntimeVersionStatus> {
+    return acpRuntimeVersion(this.name, this.options.command, this.init?.agentInfo?.version, { ...options, env: this.options.env });
+  }
+
+  async updateRuntime(_options: RuntimeUpdateOptions = {}): Promise<RuntimeUpdateResult> {
+    throw new UnsupportedFeatureError("update its runtime", this.name, `update ${this.options.command} the way you installed it`);
   }
 
   async usage(): Promise<UsageReport> {

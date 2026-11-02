@@ -39,7 +39,8 @@ import {
   SteerRejectedError,
   UnsupportedFeatureError,
 } from "../errors.ts";
-import { checkMinimumVersion } from "../compat.ts";
+import { CLAUDE_CODE_MIN_VERSION, checkMinimumVersion } from "../compat.ts";
+import { runtimeVersion, updateRuntime } from "../runtime-updates.ts";
 import { attachedFilesNote, isTextMedia, localFileSearch, mediaTypeOf, readFileInput, saveAttachment } from "../files.ts";
 import { seedPreamble } from "../handoff.ts";
 import { reviewPrompt } from "../review.ts";
@@ -67,6 +68,10 @@ import type {
   McpServer,
   McpServerState,
   ModelInfo,
+  RuntimeCheckOptions,
+  RuntimeUpdateOptions,
+  RuntimeUpdateResult,
+  RuntimeVersionStatus,
   PluginInfo,
   PortableTranscript,
   RealtimeSession,
@@ -88,8 +93,7 @@ import type {
 } from "../types.ts";
 import { ClaudeNormalizer, claudeHistory, claudeTranscript, claudeUsage, classifyClaudeError, isPrompt } from "./normalize.ts";
 
-/** Oldest Claude Code this library has been checked against. */
-export const CLAUDE_CODE_MIN_VERSION = "2.1.248";
+export { CLAUDE_CODE_MIN_VERSION };
 
 /** Environment variables that would make Claude Code bill an API key instead of the subscription. */
 const API_KEY_VARIABLES = ["ANTHROPIC_API_KEY", "ANTHROPIC_AUTH_TOKEN", "ANTHROPIC_BASE_URL", "CLAUDE_CODE_USE_BEDROCK", "CLAUDE_CODE_USE_VERTEX"];
@@ -129,6 +133,7 @@ export const CLAUDE_CAPABILITIES: Capabilities = {
   listTasks: true,
   stopTask: true,
   mcp: { setServers: true, reconnect: true, toggle: true, login: false, readResource: true },
+  runtimeUpdate: true,
   login: false,
   logout: false,
   hookEvents: true,
@@ -406,6 +411,14 @@ export class ClaudeEngine implements Engine {
 
   async capabilities(): Promise<Capabilities> {
     return structuredClone(CLAUDE_CAPABILITIES);
+  }
+
+  runtimeVersion(options: RuntimeCheckOptions = {}): Promise<RuntimeVersionStatus> {
+    return runtimeVersion("claude", { ...options, executable: this.options.executable, env: this.options.env, minimumVersion: this.options.minimumVersion });
+  }
+
+  updateRuntime(options: RuntimeUpdateOptions = {}): Promise<RuntimeUpdateResult> {
+    return updateRuntime("claude", { ...options, executable: this.options.executable, env: this.options.env, minimumVersion: this.options.minimumVersion });
   }
 
   async models(): Promise<ModelInfo[]> {
