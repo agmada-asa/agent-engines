@@ -6,7 +6,8 @@
  * What an agent can do varies, so `capabilities()` reads the agent's own
  * `initialize` answer. ACP has no steering, so `Turn.steer` always refuses.
  * Approvals arrive as `session/request_permission` and surface as `request`
- * events, answered automatically where the thread's access level decides.
+ * events, answered automatically where the thread's access level decides. Some
+ * agents ask multiple-choice questions the same way; those always reach the caller.
  */
 
 import { randomUUID } from "node:crypto";
@@ -63,7 +64,7 @@ import type {
   UsageReport,
 } from "../types.ts";
 import { ACP_PROTOCOL_VERSION, AcpClient, AcpRpcError, type SpawnAcpProcess } from "./client.ts";
-import { AcpNormalizer } from "./normalize.ts";
+import { AcpNormalizer, namesNoOperation } from "./normalize.ts";
 
 type Json = Record<string, any>;
 
@@ -506,6 +507,71 @@ function record(value: unknown): Json | undefined {
   return typeof value === "object" && value !== null && !Array.isArray(value) ? (value as Json) : undefined;
 }
 
+/**
+ * The question a permission request asks, or undefined if it is an approval.
+ * ACP has no question request, so agents such as Antigravity put the answers in
+ * the options of `session/request_permission`. The shape is all there is to go on:
+ * - two or more options, all `allow_once`, so a kind cannot tell them apart and
+ *   there is no way to refuse;
+ * - a title to ask, and nothing naming an operation: no tool kind, input, name,
+ *   locations or content, either here or in what the agent announced of this call
+ *   (a request may send only the fields that changed).
+ * Anything else stays an approval, as it always was.
+ */
+function questionAsked(call: Json, announced: Json | undefined, options: readonly Json[]): string | undefined {
+  if (options.length < 2 || options.some((option) => option.kind !== "allow_once")) return undefined;
+  if (!namesNoOperation(call) || (announced && !namesNoOperation(announced))) return undefined;
+  const title = call.title ?? announced?.title;
+  return typeof title === "string" && title.trim() ? title : undefined;
+}
+
+/** How a question's answer goes back to the agent. */
+interface QuestionAnswers {
+  choose(optionId: string, label: string): void;
+  decline(): void;
+  /** Delivers words that are no one option; undefined when there is no turn to deliver them in. */
+  say?: (words: string) => void;
+}
+
+/**
+ * A permission request that asks a question, as a question. The protocol can only
+ * answer with one option or none: exactly one label chooses that option, and
+ * anything else, free text or several labels, is delivered in the agent's words.
+ */
+function optionQuestion(id: string, question: string, options: readonly Json[], raw: unknown, answers: QuestionAnswers): AgentRequest {
+  // Answers come back by label, so two options with one name must not share a label.
+  const optionIds = new Map<string, string>();
+  const names = new Set(options.map((option) => String(option.name ?? option.optionId)));
+  for (const option of options) {
+    const name = String(option.name ?? option.optionId);
+    let label = name;
+    if (optionIds.has(label)) {
+      const base = `${name} (${option.optionId})`;
+      label = base;
+      let suffix = 2;
+      while (optionIds.has(label) || names.has(label)) label = `${base} (${suffix++})`;
+    }
+    optionIds.set(label, String(option.optionId));
+  }
+  const labels = [...optionIds.keys()];
+  return {
+    kind: "question",
+    id,
+    questions: [{ id, header: "", question, options: labels.map((label) => ({ label, description: "" })), multiSelect: answers.say !== undefined, allowOther: answers.say !== undefined, secret: false }],
+    raw,
+    respond: async (given) => {
+      if (!Object.keys(given).length) return answers.decline();
+      const chosen = given[id] ?? [];
+      const optionId = chosen.length === 1 ? optionIds.get(chosen[0]!) : undefined;
+      if (optionId !== undefined) return answers.choose(optionId, chosen[0]!);
+      const words = chosen.join(", ").trim();
+      // Never guess: the request stays open for an answer that says something.
+      if (!words || !answers.say) throw new AgentEngineError(`Answer "${question}" with one of: ${labels.join(", ")}${answers.say ? ", or your own words" : ""}.`);
+      answers.say(words);
+    },
+  };
+}
+
 /** How `open` reaches the session. */
 interface OpenSource {
   forkOf?: string;
@@ -528,6 +594,10 @@ class AcpThread implements Thread {
   private closed = false;
   private seedPending: boolean;
   private access: ThreadOptions["access"];
+  /** Words to send as the running turn's next prompt, once the current one has stopped. */
+  private followUp?: string;
+  /** Whether the caller interrupted the running turn. */
+  private interrupting = false;
 
   constructor(
     private readonly engine: AcpEngine,
@@ -644,9 +714,20 @@ class AcpThread implements Thread {
         if (turnOptions.access) this.access = turnOptions.access;
         const preamble = this.seedPending && this.options.seed ? seedPreamble(this.options.seed) : "";
         this.seedPending = false;
-        const prompt = await this.promptBlocks(prefixInput(input, preamble));
-        const response = await client.request<Json>("session/prompt", { sessionId: this.id, prompt }, { timeoutMs: 0 });
-        this.settle(turn, String(response?.stopReason ?? "end_turn"));
+        let prompt = await this.promptBlocks(prefixInput(input, preamble));
+        for (;;) {
+          const response = await client.request<Json>("session/prompt", { sessionId: this.id, prompt }, { timeoutMs: 0 });
+          if (turn.done || this.current !== turn) return;
+          if (this.interrupting) return this.finish(turn, { status: "interrupted" });
+          const followUp = this.followUp;
+          this.followUp = undefined;
+          if (followUp !== undefined) {
+            prompt = [{ type: "text", text: followUp }];
+            continue;
+          }
+          const stopReason = String(response?.stopReason ?? "end_turn");
+          return this.settle(turn, stopReason);
+        }
       } catch (error) {
         this.failTurn(turn, error);
       }
@@ -780,6 +861,8 @@ class AcpThread implements Thread {
 
   /** @internal One `session/update` for this session. */
   update(update: Json): void {
+    // Hide the agent's response to the declined option request while the user's words wait.
+    if (this.followUp !== undefined && (update.sessionUpdate === "agent_message_chunk" || update.sessionUpdate === "agent_thought_chunk")) return;
     for (const event of this.normalizer.normalize(update, this.replaying)) this.dispatch(event);
   }
 
@@ -793,11 +876,17 @@ class AcpThread implements Thread {
   /**
    * @internal A permission request. The access level answers it where it can:
    * `full` allows once, `read-only` refuses once, `accept-edits` allows file edits;
-   * anything else surfaces as a `request` event.
+   * anything else surfaces as a `request` event. A question always surfaces: it
+   * asks for the user's choice, not for permission, so no access level can answer it.
    */
   permission(p: Json): Promise<unknown> {
     const options: Json[] = Array.isArray(p.options) ? p.options : [];
     const call = record(p.toolCall) ?? {};
+    const id = String(call.toolCallId ?? randomUUID());
+    const question = questionAsked(call, this.normalizer.announcedTool(id), options);
+    for (const event of this.normalizer.permissionAsked(id, question !== undefined)) this.dispatch(event);
+    // Cancellation can race another request from the same prompt. Do not reopen it.
+    if (this.interrupting && this.current && !this.current.done) return Promise.resolve({ outcome: { outcome: "cancelled" } });
     const pick = (...kinds: string[]) => {
       for (const kind of kinds) {
         const option = options.find((entry) => entry.kind === kind);
@@ -807,8 +896,10 @@ class AcpThread implements Thread {
     };
     const edit = call.kind === "edit" || call.kind === "delete" || call.kind === "move";
     // Automatic answers allow once, so they never widen what the agent may do later.
-    if (this.access === "full" || (this.access === "accept-edits" && edit)) return Promise.resolve(pick("allow_once", "allow_always"));
-    if (this.access === "read-only") return Promise.resolve(pick("reject_once", "reject_always"));
+    if (question === undefined) {
+      if (this.access === "full" || (this.access === "accept-edits" && edit)) return Promise.resolve(pick("allow_once", "allow_always"));
+      if (this.access === "read-only") return Promise.resolve(pick("reject_once", "reject_always"));
+    }
     return new Promise((resolve) => {
       let settled = false;
       const settle = (answer: unknown) => {
@@ -820,9 +911,33 @@ class AcpThread implements Thread {
       const cancel = () => settle({ outcome: { outcome: "cancelled" } });
       this.pendingRequests.add(cancel);
       const command = call.kind === "execute" ? (record(call.rawInput)?.command ?? call.title) : undefined;
-      const request: AgentRequest = {
+      const answered = (answer?: string) => {
+        if (!settled) this.normalizer.questionAnswered(question!, answer);
+      };
+      const running = this.current && !this.current.done;
+      const request: AgentRequest = question !== undefined ? optionQuestion(id, question, options, p, {
+        choose: (optionId, label) => {
+          answered(label);
+          settle({ outcome: { outcome: "selected", optionId } });
+        },
+        decline: () => {
+          answered();
+          cancel();
+        },
+        ...(running ? {
+          // ACP can return only an option ID. Decline, then deliver the words after
+          // the prompt finishes. Cancelling the session races some agents' next prompt.
+          say: (words: string) => {
+            if (settled) return;
+            answered(words);
+            const reply = `Answer to your question "${question}": ${words}`;
+            this.followUp = this.followUp === undefined ? reply : `${this.followUp}\n${reply}`;
+            cancel();
+          },
+        } : {}),
+      }) : {
         kind: "approval",
-        id: String(call.toolCallId ?? randomUUID()),
+        id,
         action: call.kind === "execute" ? "command" : edit ? "file-change" : "tool",
         title: String(call.title ?? "Use a tool"),
         ...(typeof command === "string" ? { command } : Array.isArray(command) ? { command: command.join(" ") } : {}),
@@ -874,12 +989,15 @@ class AcpThread implements Thread {
       },
       interrupt: async () => {
         if (turn.done || this.current !== turn) return;
+        this.followUp = undefined;
+        this.interrupting = true;
         this.loadedOn?.notify("session/cancel", { sessionId: this.id });
         this.cancelRequests();
       },
     });
     turn.setId(randomUUID());
     this.current = turn;
+    this.interrupting = false;
     this.normalizer.startTurn(turn.turnId!, prompt);
     this.dispatch({ threadId: this.id, turnId: turn.turnId!, type: "turn.started" });
     return turn;
@@ -967,6 +1085,7 @@ class AcpThread implements Thread {
 
   private finish(turn: TurnHandle, outcome: { status: TurnResult["status"]; error?: TurnResult["error"] }): void {
     if (turn.done) return;
+    this.followUp = undefined;
     for (const event of this.normalizer.endTurn(outcome.status === "failed" ? "failed" : outcome.status)) this.dispatch(event);
     const base = { threadId: this.id, turnId: turn.turnId! };
     const text = outcome.status === "failed" ? "" : this.normalizer.reply;
