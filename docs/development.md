@@ -16,6 +16,7 @@ AGENT_ENGINES_LIVE=1 npm run test:live
 ```
 
 - **Codex and Claude:** a steered turn, an interrupted turn, a compaction, a resume and a delete. A second scenario checks plan mode, structured output, history, rename, fork, rewind, a handoff seed and a review.
+- **Codex only:** a tier catalogue, a thread acknowledgment and a turn whose requested tier stays separate from that acknowledgment. Uses `priority` when the selected model lists it, otherwise the runtime default; does not require Ultrafast access.
 - **Claude only:** a question round trip, and confirming a subagent's real model from its own messages.
 - **ACP:** a turn with a tool and an edit, plan mode, a resume with history, a fork and a handoff, on OpenCode. It skips when `opencode` isn't installed.
 

@@ -783,6 +783,7 @@ class ClaudeThread implements Thread {
     resumed: boolean,
   ) {
     if (!isAbsolute(options.cwd)) throw new AgentEngineError("A thread needs an absolute cwd.");
+    if (options.serviceTier !== undefined) throw new UnsupportedFeatureError("select a service tier", "Claude", "use fastMode instead");
     this.normalizer = new ClaudeNormalizer(id);
     this.prompted = resumed;
     this.access = options.access;
@@ -832,6 +833,7 @@ class ClaudeThread implements Thread {
     const turn = this.newTurn();
     void (async () => {
       try {
+        if (turnOptions.serviceTier !== undefined) throw new UnsupportedFeatureError("select a service tier", "Claude", "use fastMode instead");
         const schema = turnOptions.outputSchema === null ? undefined : (turnOptions.outputSchema ?? this.options.outputSchema);
         const schemaKey = schema ? JSON.stringify(schema) : "";
         const accessChanged = turnOptions.access !== undefined && turnOptions.access !== this.access;

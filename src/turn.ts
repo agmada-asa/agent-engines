@@ -4,7 +4,7 @@
  * Engines push normalised events and call `finish` exactly once.
  */
 
-import type { AgentEvent, Turn, TurnInput, TurnResult } from "./types.ts";
+import type { AgentEvent, ServiceTierSelection, Turn, TurnInput, TurnResult } from "./types.ts";
 
 /** What an engine supplies to control its own turn. */
 export interface TurnControls {
@@ -25,6 +25,8 @@ export class TurnHandle implements Turn {
   private knownId?: string;
   /** Whether this turn asked for structured output, so its reply is parsed into `output`. */
   expectsOutput = false;
+  /** Tier metadata for this turn only, never borrowed from a thread acknowledgment. */
+  serviceTier?: ServiceTierSelection;
 
   constructor(
     readonly threadId: string,
@@ -63,7 +65,7 @@ export class TurnHandle implements Turn {
     if (this.finished) return;
     this.setId(result.turnId);
     this.finished = true;
-    this.resolveResult(result);
+    this.resolveResult({ ...result, ...(this.serviceTier ? { serviceTier: this.serviceTier } : {}) });
     this.wake();
   }
 

@@ -605,6 +605,7 @@ class AcpThread implements Thread {
     resumeId?: string,
   ) {
     if (!isAbsolute(options.cwd)) throw new AgentEngineError("A thread needs an absolute cwd.");
+    if (options.serviceTier !== undefined) throw new UnsupportedFeatureError("select a service tier", engine.name);
     if (options.outputSchema) throw new UnsupportedFeatureError("return structured output", engine.name);
     if (options.limits && Object.values(options.limits).some((value) => value !== undefined)) throw new UnsupportedFeatureError("enforce turn limits", engine.name);
     if (options.agents && Object.keys(options.agents).length) throw new UnsupportedFeatureError("take custom subagents", engine.name);
@@ -705,6 +706,7 @@ class AcpThread implements Thread {
     const turn = this.newTurn(text);
     void (async () => {
       try {
+        if (turnOptions.serviceTier !== undefined) throw new UnsupportedFeatureError("select a service tier", this.engine.name);
         const client = await this.ready();
         // Reloading the session after the agent restarted replaced the normalizer; this turn starts on the new one.
         if (this.normalizer.turnId !== turn.turnId) this.normalizer.startTurn(turn.turnId!, text);

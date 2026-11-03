@@ -9,7 +9,7 @@ import { ClaudeEngine } from "../../src/claude/engine.ts";
 import { parityScenario } from "./parity.ts";
 import { LIVE, smokeScenario } from "./scenario.ts";
 
-const MODEL = process.env.AGENT_ENGINES_CLAUDE_MODEL ?? "claude-haiku-5-5";
+const MODEL = process.env.AGENT_ENGINES_CLAUDE_MODEL ?? "haiku";
 
 test("Claude: turn, steer, interrupt, compact, resume, delete", { skip: !LIVE && "set AGENT_ENGINES_LIVE=1", timeout: 600_000 }, async (t) => {
   await smokeScenario(

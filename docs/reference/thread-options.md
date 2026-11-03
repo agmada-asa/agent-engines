@@ -7,6 +7,7 @@ What `startThread`, `resumeThread` and `forkThread` take, and what each option b
 | `cwd` | Thread cwd | Process cwd | Session cwd |
 | `model`, `effort` | Thread and per-turn | SDK options and per-turn controls | The session's `model` and `thought_level` options |
 | `fastMode` | `priority` service tier, thread and per-turn | Fast mode setting, and per-turn controls | Ignored |
+| `serviceTier` | Catalogue tier ID, or `null` for the runtime default; overrides `fastMode`, thread and per-turn | Not supported | Not supported |
 | `access` | Approval policy, sandbox and reviewer | Permission mode | Answers permission requests itself where it can |
 | `mode` (`default`, `plan`) | The thread's collaboration mode, set before the turn | Plan permission mode | The session mode named plan |
 | `instructions` | Developer instructions | Appended to Claude Code's system prompt | Not sent |

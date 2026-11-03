@@ -1,6 +1,6 @@
 /**
- * @file agent-engines: one API over Codex (`codex app-server`) and Claude (the
- * Claude Agent SDK). Create an engine, start or resume a thread, run turns and
+ * @file agent-engines: one API over Codex (`codex app-server`), Claude (the
+ * Claude Agent SDK) and ACP agents. Start or resume a thread, run turns and
  * read one normalised event stream. Policy stays with the consumer.
  */
 

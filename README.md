@@ -31,6 +31,7 @@ for await (const event of turn) {
 - **Plan mode, structured output and code review**, wherever the runtime supports them.
 - **Portable conversations.** Export a conversation from one runtime and continue it on another.
 - **Runtime management.** Check versions, update the CLIs and read plan limits without spending a turn.
+- **Codex speed tiers.** List the account's available tiers and request one explicitly, including Ultrafast. [Requested and accepted settings](https://agmada-asa.github.io/agent-engines/guide/models#requested-and-accepted-tiers) stay distinct from inference confirmation.
 - **Honest about differences.** `capabilities()` says what a runtime can do, and a method it can't run throws an error rather than quietly doing something else.
 
 ## Supported runtimes

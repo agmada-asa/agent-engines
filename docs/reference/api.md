@@ -19,7 +19,7 @@
 
 | Area | Methods |
 | --- | --- |
-| Turns | `run(input, { model, effort, fastMode, access, mode, outputSchema })`, `compact()`, `review()`, `activeTurn`, `lastTurn()`, `interruptTurn(turnId)`, `subscribe(listener)` |
+| Turns | `run(input, { model, effort, fastMode, serviceTier, access, mode, outputSchema })`, `compact()`, `review()`, `activeTurn`, `lastTurn()`, `interruptTurn(turnId)`, `subscribe(listener)` |
 | History | `history()`, `rewind(beforeTurnId, { files })`, `rename()`, `export()`, `contextUsage()`, `subagentTranscript(agentId)` |
 | Work | `setGoal()`, `goal()`, `clearGoal()`, `shell()`, `tasks()`, `stopTask()` |
 | MCP and extensions | `mcpStatus()`, `setMcpServers()`, `reconnectMcp()`, `toggleMcp()`, `mcpLogin()`, `readMcpResource()`, `reloadSkills()`, `reloadPlugins()` |
@@ -28,6 +28,8 @@
 ## `Turn`
 
 A turn is an async iterable of `AgentEvent`s, plus `id`, `steer()`, `interrupt()` and `result`. `result` never rejects.
+
+For Codex, `ModelInfo.serviceTiers` lists `ServiceTierInfo` entries. `Thread.serviceTier` and `TurnResult.serviceTier` use `ServiceTierSelection` to distinguish requested and acknowledged settings. See [speed tiers](/guide/models#requested-and-accepted-tiers) for the scope and confirmation limits.
 
 ## `AgentEvent`
 

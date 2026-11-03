@@ -446,7 +446,24 @@ export interface RuntimeUpdateResult {
   output?: string;
 }
 
-/** One model offered by a runtime's own catalogue. */
+/** A service tier offered by the signed-in runtime. */
+export interface ServiceTierInfo {
+  id: string;
+  name: string;
+  description: string;
+}
+
+/** A request and a runtime acknowledgment. Neither proves the inference tier used. */
+export interface ServiceTierSelection {
+  /** `null` requests the runtime's default tier; absent means no explicit request. */
+  requested?: string | null;
+  /** Only set when the runtime reports a tier for this scope. `null` means its default. */
+  accepted?: string | null;
+  /** Present when both values are known, so callers can flag a substitution. */
+  mismatch?: boolean;
+}
+
+/** One model offered by a runtime's catalogue. */
 export interface ModelInfo {
   /** Value to pass as `model`. */
   id: string;
@@ -457,6 +474,8 @@ export interface ModelInfo {
   defaultEffort?: string;
   /** Whether `fastMode` can be used with this model. */
   fastMode: boolean;
+  /** Account-specific service tiers, including their runtime labels and descriptions (Codex). */
+  serviceTiers?: ServiceTierInfo[];
   isDefault: boolean;
   /** The full model ID an alias such as `haiku` points to right now (Claude). */
   resolvedModel?: string;
@@ -576,8 +595,10 @@ export interface ThreadOptions {
   cwd: string;
   model?: string;
   effort?: string;
-  /** Codex `fast` service tier, or Claude fast mode. */
+  /** Codex `priority` service tier, or Claude fast mode. */
   fastMode?: boolean;
+  /** Codex tier ID from `models()`. `null` resets to the runtime default. Overrides `fastMode`. Other providers reject it. */
+  serviceTier?: string | null;
   access?: Access;
   /** `plan` to research and propose before changing anything. Defaults to `default`. */
   mode?: ThreadMode;
@@ -719,6 +740,8 @@ export interface TurnOptions {
   model?: string;
   effort?: string;
   fastMode?: boolean;
+  /** Codex tier ID, or `null` for the runtime default. Overrides `fastMode` and sticks for later turns. */
+  serviceTier?: string | null;
   /** A new access level from this turn on. */
   access?: Access;
   /** A new mode from this turn on: `plan` to propose first, `default` to do the work. */
@@ -825,6 +848,8 @@ export interface RealtimeSession {
 export interface Thread {
   readonly id: string;
   readonly provider: ProviderId;
+  /** Codex's requested tier and thread acknowledgment. A tier/model change or connection loss clears the acknowledgment. */
+  readonly serviceTier?: ServiceTierSelection;
   /** Starts a turn. Fails with `SteerRejectedError` semantics only via `Turn.steer`; one turn runs at a time. */
   run(input: TurnInput, options?: TurnOptions): Turn;
   /** Compacts the thread's context. Runs as a turn of its own, ending with a `compacted` event. */
@@ -931,6 +956,8 @@ export interface TurnResult {
   /** With an `outputSchema`: the reply, parsed. Undefined when it was not valid JSON. */
   output?: unknown;
   usage?: TokenUsage;
+  /** Tier requested for this turn. `accepted` is absent unless the runtime confirms it for the turn. */
+  serviceTier?: ServiceTierSelection;
   error?: TurnError;
 }
 
@@ -1097,6 +1124,8 @@ export type AgentEvent = EventBase &
      * time an agent answers and again if its model changes; `agentId` is set for a subagent.
      */
     | { type: "model.confirmed"; model: string }
+    /** A tier request or acknowledgment, scoped to thread settings or a turn. Not inference confirmation. */
+    | { type: "service-tier.updated"; scope: "thread" | "turn"; serviceTier: ServiceTierSelection }
     /** Something the runtime wants the user to know that is not part of the reply: a warning, a refusal, a denied tool. */
     | { type: "notice"; kind: NoticeKind; message: string; details?: string; raw?: unknown }
     /** A hook (the user's, a project's, a plugin's or the host's) started or finished. */

@@ -51,6 +51,7 @@ import type {
   RuntimeUpdateOptions,
   RuntimeUpdateResult,
   RuntimeVersionStatus,
+  ServiceTierSelection,
   PluginInfo,
   PortableTranscript,
   RealtimeOptions,
@@ -274,6 +275,7 @@ export function codexModelInfo(model: Model): ModelInfo {
     efforts: [...new Set(model.supportedReasoningEfforts.map((option) => option.reasoningEffort))],
     ...(model.defaultReasoningEffort ? { defaultEffort: model.defaultReasoningEffort } : {}),
     fastMode: model.serviceTiers.some((tier) => tier.id === FAST_TIER),
+    serviceTiers: model.serviceTiers.map((tier) => ({ ...tier })),
     isDefault: model.isDefault,
     hidden: model.hidden,
     inputModalities: [...model.inputModalities],
@@ -932,6 +934,9 @@ class CodexThread implements Thread {
   /** The mode last sent to Codex on this connection. */
   private appliedMode?: ThreadMode;
   private checkpoints?: Promise<CheckpointStore | undefined>;
+  private requestedServiceTier?: string | null;
+  private tierSelection: ServiceTierSelection = {};
+  private tierReportedFor?: TurnHandle;
 
   constructor(
     private readonly engine: CodexEngine,
@@ -946,6 +951,11 @@ class CodexThread implements Thread {
     this.normalizer = new CodexNormalizer(this.id);
     this.access = options.access;
     this.mode = options.mode;
+    this.requestedServiceTier = requestedTier(options);
+  }
+
+  get serviceTier(): ServiceTierSelection {
+    return { ...this.tierSelection };
   }
 
   get activeTurn(): Turn | undefined {
@@ -981,7 +991,7 @@ class CodexThread implements Thread {
       ...(Object.keys(config).length ? { config: config as ThreadStartParams["config"] } : {}),
       ...(options.instructions ? { developerInstructions: options.instructions } : {}),
       ...(options.codex?.baseInstructions ? { baseInstructions: options.codex.baseInstructions } : {}),
-      ...(options.fastMode !== undefined ? { serviceTier: options.fastMode ? FAST_TIER : null } : {}),
+      ...(this.requestedServiceTier !== undefined ? { serviceTier: this.requestedServiceTier } : {}),
     };
     let response: ThreadStartResponse | ThreadForkResponse;
     const fresh = !this.id;
@@ -1014,6 +1024,12 @@ class CodexThread implements Thread {
       throw new RuntimeModelSubstitutionError(options.model, response.model);
     }
     this.model = response.model;
+    const accepted = typeof response.serviceTier === "string" || response.serviceTier === null ? response.serviceTier : undefined;
+    this.tierSelection = tierSelection(this.requestedServiceTier, accepted);
+    this.dispatch({ threadId: this.id, turnId: "", type: "service-tier.updated", scope: "thread", serviceTier: this.serviceTier });
+    if (this.tierSelection.mismatch) {
+      this.dispatch({ threadId: this.id, turnId: "", type: "notice", kind: "warning", message: `Codex accepted service tier ${JSON.stringify(accepted)}; ${JSON.stringify(this.requestedServiceTier)} was requested.` });
+    }
     this.loadedOn = client;
     this.appliedMode = undefined;
     if (fresh || source) {
@@ -1321,6 +1337,7 @@ class CodexThread implements Thread {
   /** @internal The connection dropped: fail the running turn and reload on next use. */
   lost(error: Error): void {
     this.loadedOn = undefined;
+    this.tierSelection = tierSelection(this.requestedServiceTier);
     this.cancelRequests();
     if (this.current && !this.current.done) this.failTurn(this.current, error);
   }
@@ -1350,8 +1367,11 @@ class CodexThread implements Thread {
         this.accessChanged = true;
       }
       if (turnOptions.mode !== undefined) this.mode = turnOptions.mode;
+      const modelChanged = Boolean(turnOptions.model && turnOptions.model !== this.model);
       if (turnOptions.model) this.model = turnOptions.model;
-      const fastMode = turnOptions.fastMode;
+      const tier = requestedTier(turnOptions);
+      const requested = tier !== undefined ? tier : this.requestedServiceTier;
+      turn.serviceTier = requested !== undefined ? tierSelection(requested) : undefined;
       const effort = turnOptions.effort ?? this.options.effort;
       const schema = turnOptions.outputSchema === null ? undefined : (turnOptions.outputSchema ?? this.options.outputSchema);
       turn.expectsOutput = schema !== undefined;
@@ -1360,7 +1380,7 @@ class CodexThread implements Thread {
         input: await codexInput(input),
         ...(turnOptions.model ? { model: turnOptions.model } : {}),
         ...(effort ? { effort: effort as TurnStartParams["effort"] } : {}),
-        ...(fastMode !== undefined ? { serviceTier: fastMode ? FAST_TIER : null } : {}),
+        ...(requested !== undefined ? { serviceTier: requested } : {}),
         ...turnPolicy(this.options, this.access, this.accessChanged),
         ...(schema ? { outputSchema: schema as TurnStartParams["outputSchema"] } : {}),
       };
@@ -1374,8 +1394,11 @@ class CodexThread implements Thread {
         this.appliedMode = this.mode;
       }
       const tree = await this.snapshot();
+      if (modelChanged || requested !== this.requestedServiceTier) this.tierSelection = tierSelection(requested);
+      this.requestedServiceTier = requested;
       const response = await client.request<TurnStartResponse>("turn/start", params);
       turn.setId(response.turn.id);
+      this.reportTurnTier(turn, response.turn.id);
       await this.keepSnapshot(response.turn.id, tree);
       if (!this.normalizer.currentTurnId) this.normalizer.currentTurnId = response.turn.id;
     } catch (error) {
@@ -1422,6 +1445,13 @@ class CodexThread implements Thread {
       }
     }
     emitTo(this.listeners, delivered);
+    if (turn && delivered.type === "turn.started" && !delivered.agentId) this.reportTurnTier(turn, delivered.turnId);
+  }
+
+  private reportTurnTier(turn: TurnHandle, turnId: string): void {
+    if (turn.done || !turn.serviceTier || this.tierReportedFor === turn) return;
+    this.tierReportedFor = turn;
+    this.dispatch({ threadId: this.id, turnId, type: "service-tier.updated", scope: "turn", serviceTier: { ...turn.serviceTier } });
   }
 
   private failTurn(turn: TurnHandle, error: unknown): void {
@@ -1438,6 +1468,21 @@ class CodexThread implements Thread {
     for (const pending of this.pendingRequests.values()) pending.cancel();
     this.pendingRequests.clear();
   }
+}
+
+/** An explicit tier takes precedence over the legacy boolean, including an explicit reset. */
+function requestedTier(options: { serviceTier?: string | null; fastMode?: boolean }): string | null | undefined {
+  if (options.serviceTier !== undefined) return options.serviceTier;
+  if (options.fastMode === undefined) return undefined;
+  return options.fastMode ? FAST_TIER : null;
+}
+
+function tierSelection(requested?: string | null, accepted?: string | null): ServiceTierSelection {
+  return {
+    ...(requested !== undefined ? { requested } : {}),
+    ...(accepted !== undefined ? { accepted } : {}),
+    ...(requested !== undefined && accepted !== undefined ? { mismatch: requested !== accepted } : {}),
+  };
 }
 
 /** The settled result for a terminal event. */

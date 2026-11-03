@@ -2,7 +2,7 @@
 
 ## Choosing a model
 
-`engine.models()` returns what the runtime offers. Each entry has an `id`, `label`, `efforts` and `fastMode`, and can have `defaultEffort`, `isDefault`, `hidden` and `inputModalities`.
+`engine.models()` returns what the runtime offers. Each entry has an `id`, `label`, `efforts` and `fastMode`, and can have `defaultEffort`, `isDefault`, `hidden` and `inputModalities`. Codex also returns `serviceTiers`, with each tier's `id`, `name` and `description` from the signed-in account's catalogue.
 
 The list depends on the sign-in and the runtime version, so read it at runtime rather than hard-coding IDs.
 
@@ -51,6 +51,26 @@ The speed gain and any extra usage vary by model. Codex describes them in its ow
 
 ### Codex's Ultrafast tier
 
-Ultrafast is not supported yet. `fastMode` only ever requests `priority`, so it can't select OpenAI's `ultrafast` service tier.
+Use `serviceTier` to select a Codex tier explicitly, including `ultrafast`:
+
+```ts
+const models = await engine.models();
+const tiers = models.find((model) => model.id === "gpt-6.1-sol")?.serviceTiers ?? [];
+
+if (tiers.some((tier) => tier.id === "ultrafast")) {
+  const thread = await engine.startThread({ cwd, model: "gpt-6.1-sol", serviceTier: "ultrafast" });
+  console.log(thread.serviceTier); // { requested, accepted, mismatch }
+  const result = await thread.run("Review the changes").result;
+  console.log(result.serviceTier); // { requested: "ultrafast" }, not inference confirmation
+}
+```
+
+`serviceTier` takes a catalogue ID, or `null` to reset to the runtime's default. It works on start, resume, fork and per turn, and a turn's choice sticks for later turns and reconnection. An explicit `serviceTier` overrides `fastMode` in the same call. A later `fastMode: true` selects `priority`; `false` resets the tier. Claude and ACP reject `serviceTier`; use Claude's `fastMode` instead.
+
+### Requested and accepted tiers
+
+`thread.serviceTier` exposes the requested tier and the tier Codex acknowledged in its start, resume or fork response. `accepted: null` means the runtime's default; a missing `accepted` means it did not report one. When an explicit request differs from the acknowledgment, `mismatch` is `true` and the thread emits a warning notice. Read the property after opening a thread, since an initial event happens before you can subscribe. Changing the tier or model on a turn, or losing the connection, clears the old acknowledgment.
+
+`service-tier.updated` events have `scope: "thread"` for those acknowledgments and `scope: "turn"` for turn requests. A thread event has an empty `turnId`. The current Codex protocol does not confirm the inference tier used for a turn, so `result.serviceTier` and turn-scoped events report the request and leave `accepted` absent. A thread acknowledgment is a setting, not proof of inference service or billing. The engine passes tier IDs through to Codex; its live catalogue helps a UI offer available choices, but the runtime decides whether to accept a request.
 
 OpenAI [documents Ultrafast](https://learn.chatgpt.com/codex/speed) for GPT-6 Astra and GPT-6.1 Sol in Codex on Pro $500 and eligible Enterprise and Edu plans, as well as through the API. Availability depends on the account and plan; a catalogue without Ultrafast doesn't establish whether other accounts have access.

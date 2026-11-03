@@ -39,6 +39,21 @@ function ofType<T extends AgentEvent["type"]>(events: AgentEvent[], type: T): Ar
   return events.filter((event): event is Extract<AgentEvent, { type: T }> => event.type === type);
 }
 
+test("ACP rejects explicit service tiers before sending a prompt", async () => {
+  const { engine, agent } = engineWith();
+  try {
+    await assert.rejects(engine.startThread({ cwd: CWD, serviceTier: "ultrafast" }), UnsupportedFeatureError);
+    await assert.rejects(engine.startThread({ cwd: CWD, serviceTier: null }), UnsupportedFeatureError);
+    const thread = await engine.startThread({ cwd: CWD });
+    const result = await thread.run("Hi", { serviceTier: null }).result;
+    assert.equal(result.status, "failed");
+    assert.match(result.error!.message, /service tier/);
+    assert.equal(agent().requests("session/prompt").length, 0);
+  } finally {
+    await engine.close();
+  }
+});
+
 /** A prompt that asks for one permission per tool call, records each answer, then ends the turn. */
 function permissionPrompt(answers: unknown[], ...toolCalls: Array<Record<string, unknown>>): AcpHandler {
   return async (params, server) => {

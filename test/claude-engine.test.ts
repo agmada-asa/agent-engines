@@ -6,7 +6,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
 import { ClaudeEngine } from "../src/claude/engine.ts";
-import { RuntimeAuthError, RuntimeCompatibilityError, RuntimeModelUnavailableError, SteerRejectedError } from "../src/errors.ts";
+import { RuntimeAuthError, RuntimeCompatibilityError, RuntimeModelUnavailableError, SteerRejectedError, UnsupportedFeatureError } from "../src/errors.ts";
 import type { AgentEvent } from "../src/types.ts";
 import { until } from "./fake-app-server.ts";
 import { fakeClaudeSdk, replyMessages } from "./fake-claude-sdk.ts";
@@ -16,6 +16,23 @@ async function collect(iterable: AsyncIterable<AgentEvent>): Promise<AgentEvent[
   for await (const event of iterable) events.push(event);
   return events;
 }
+
+test("Claude rejects explicit service tiers before sending a prompt", async () => {
+  const { sdk, queries } = fakeClaudeSdk();
+  const engine = new ClaudeEngine({ sdk });
+  try {
+    await assert.rejects(engine.startThread({ cwd: "/tmp", serviceTier: "ultrafast" }), UnsupportedFeatureError);
+    await assert.rejects(engine.startThread({ cwd: "/tmp", serviceTier: null }), UnsupportedFeatureError);
+    assert.equal(queries.length, 0);
+    const thread = await engine.startThread({ cwd: "/tmp" });
+    const result = await thread.run("Hi", { serviceTier: "priority" }).result;
+    assert.equal(result.status, "failed");
+    assert.match(result.error!.message, /service tier/);
+    assert.equal(queries[0].inputs.length, 0);
+  } finally {
+    await engine.close();
+  }
+});
 
 test("startThread maps neutral options onto SDK options and checks before any prompt", async () => {
   const { sdk, queries } = fakeClaudeSdk();

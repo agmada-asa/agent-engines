@@ -13,7 +13,7 @@ A turn is an async iterable of `AgentEvent`s. `thread.subscribe()` sees every ev
 | Plans | `plan.updated`, `plan.proposal.delta`, `plan.proposal.done` |
 | Background work | `status`, `task.started`, `task.progress`, `task.ended`, `subagent.started`, `subagent.ended` |
 | Requests | `request`, `request.resolved` |
-| Usage and models | `usage`, `rate-limit`, `compacted`, `model.rerouted`, `model.confirmed` |
+| Usage and models | `usage`, `rate-limit`, `compacted`, `model.rerouted`, `model.confirmed`, `service-tier.updated` |
 | Runtime | `notice`, `hook.started`, `hook.completed`, `goal.updated`, `mcp.status`, `thread.renamed`, `prompt.suggestion`, `realtime.*` |
 
 `engine.subscribe()` gets the events that belong to no thread: `account.changed` and `notice` (a config warning, a deprecation). Only Codex sends these today. Claude and ACP engines accept a listener, but it never fires.

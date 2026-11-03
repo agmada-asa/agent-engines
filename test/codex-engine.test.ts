@@ -17,7 +17,10 @@ function handlers(extra: Record<string, (params: any, server: FakeAppServer) => 
       data: [{
         id: "gpt-6-luna", model: "gpt-6-luna", displayName: "GPT-6 Luna", description: "Fast", hidden: false, isDefault: false,
         supportedReasoningEfforts: [{ reasoningEffort: "low", description: "" }, { reasoningEffort: "high", description: "" }],
-        defaultReasoningEffort: "low", inputModalities: ["text", "image"], serviceTiers: [{ id: "priority", name: "Fast", description: "" }],
+        defaultReasoningEffort: "low", inputModalities: ["text", "image"], serviceTiers: [
+          { id: "priority", name: "Fast", description: "Faster responses" },
+          { id: "ultrafast", name: "Ultrafast", description: "Higher usage" },
+        ],
       }],
       nextCursor: null,
     }),
@@ -59,6 +62,7 @@ test("models() maps the catalogue, including fast mode", async () => {
   assert.deepEqual(await engine.models(), [{
     id: "gpt-6-luna", label: "GPT-6 Luna", description: "Fast", efforts: ["low", "high"], defaultEffort: "low",
     fastMode: true, isDefault: false, hidden: false, inputModalities: ["text", "image"],
+    serviceTiers: [{ id: "priority", name: "Fast", description: "Faster responses" }, { id: "ultrafast", name: "Ultrafast", description: "Higher usage" }],
   }]);
   await engine.close();
 });
@@ -147,9 +151,148 @@ test("a thread starts with mapped options, runs a turn and streams normalised ev
   const result = await turn.result;
   assert.equal(result.status, "completed");
   assert.equal(result.text, "Hi there");
-  assert.deepEqual((await events).map((event) => event.type), ["turn.started", "text.delta", "text.done", "turn.completed"]);
+  assert.deepEqual((await events).map((event) => event.type), ["turn.started", "service-tier.updated", "text.delta", "text.done", "turn.completed"]);
   assert.equal(thread.activeTurn, undefined);
   await engine.close();
+});
+
+test("explicit tiers override fastMode on start, resume and fork, including a null reset", async () => {
+  const reply = (params: any) => ({ thread: { id: THREAD }, model: "gpt-6-luna", serviceTier: params.serviceTier });
+  const { spawn, children } = fakeSpawner(handlers({ "thread/start": reply, "thread/resume": reply, "thread/fork": reply }));
+  const engine = new CodexEngine({ spawnProcess: spawn });
+  try {
+    const started = await engine.startThread({ cwd: "/tmp", fastMode: false, serviceTier: "ultrafast" });
+    assert.deepEqual(started.serviceTier, { requested: "ultrafast", accepted: "ultrafast", mismatch: false });
+    await started.close();
+    const resumed = await engine.resumeThread(THREAD, { cwd: "/tmp", fastMode: true, serviceTier: null });
+    assert.deepEqual(resumed.serviceTier, { requested: null, accepted: null, mismatch: false });
+    await resumed.close();
+    const forked = await engine.forkThread(THREAD, { cwd: "/tmp", serviceTier: "ultrafast" });
+    assert.equal(forked.serviceTier?.accepted, "ultrafast");
+    assert.equal(children[0].requests("thread/start")[0].serviceTier, "ultrafast");
+    assert.equal(children[0].requests("thread/resume")[0].serviceTier, null);
+    assert.equal(children[0].requests("thread/fork")[0].serviceTier, "ultrafast");
+  } finally {
+    await engine.close();
+  }
+});
+
+test("turn tiers stick, legacy fastMode overrides a previous tier, and results never borrow thread confirmation", async () => {
+  const { spawn, children } = fakeSpawner(handlers({
+    "thread/start": () => ({ thread: { id: THREAD }, model: "gpt-6-luna", serviceTier: "priority" }),
+  }));
+  const engine = new CodexEngine({ spawnProcess: spawn });
+  try {
+    const thread = await engine.startThread({ cwd: "/tmp", fastMode: true });
+    const run = async (options = {}) => {
+      const turn = thread.run("Hi", options);
+      const id = await turn.id;
+      children[0].notify("turn/completed", { threadId: THREAD, turn: { id, status: "completed", items: [], error: null } });
+      return turn.result;
+    };
+    assert.deepEqual((await run()).serviceTier, { requested: "priority" });
+    assert.deepEqual((await run({ serviceTier: "ultrafast", fastMode: false })).serviceTier, { requested: "ultrafast" });
+    assert.deepEqual(thread.serviceTier, { requested: "ultrafast" });
+    assert.deepEqual((await run()).serviceTier, { requested: "ultrafast" });
+    assert.deepEqual((await run({ fastMode: true })).serviceTier, { requested: "priority" });
+    assert.deepEqual((await run({ serviceTier: null, fastMode: true })).serviceTier, { requested: null });
+    await run();
+    await run({ fastMode: false });
+    assert.deepEqual(children[0].requests("turn/start").map((p) => p.serviceTier), ["priority", "ultrafast", "ultrafast", "priority", null, null, null]);
+  } finally {
+    await engine.close();
+  }
+});
+
+test("missing tier acknowledgments remain unknown, and a runtime default differs from explicit ultrafast", async () => {
+  for (const accepted of [undefined, null, "priority"]) {
+    const { spawn } = fakeSpawner(handlers({
+      "thread/start": () => ({ thread: { id: THREAD }, model: "gpt-6-luna", ...(accepted !== undefined ? { serviceTier: accepted } : {}) }),
+    }));
+    const engine = new CodexEngine({ spawnProcess: spawn });
+    try {
+      const thread = await engine.startThread({ cwd: "/tmp", serviceTier: "ultrafast" });
+      assert.deepEqual(thread.serviceTier, accepted === undefined ? { requested: "ultrafast" } : { requested: "ultrafast", accepted, mismatch: true });
+      const selection = thread.serviceTier!;
+      selection.accepted = "changed by consumer";
+      assert.notEqual(thread.serviceTier?.accepted, "changed by consumer");
+    } finally {
+      await engine.close();
+    }
+  }
+});
+
+test("a turn that completes before its start reply still reports the tier once and preserves it for the next turn", async () => {
+  let count = 0;
+  const { spawn, children } = fakeSpawner(handlers({
+    "thread/start": () => ({ thread: { id: THREAD }, model: "gpt-6-luna", serviceTier: "priority" }),
+    "turn/start": (_params, server) => {
+      const id = `quick-${++count}`;
+      queueMicrotask(() => {
+        server.notify("turn/started", { threadId: THREAD, turn: { id, status: "inProgress", items: [] } });
+        server.notify("turn/completed", { threadId: THREAD, turn: { id, status: "completed", items: [], error: null } });
+      });
+      return { turn: { id, status: "inProgress", items: [] } };
+    },
+  }));
+  const engine = new CodexEngine({ spawnProcess: spawn });
+  try {
+    const thread = await engine.startThread({ cwd: "/tmp", serviceTier: "priority" });
+    const turn = thread.run("Hi", { serviceTier: "ultrafast" });
+    assert.deepEqual((await turn.result).serviceTier, { requested: "ultrafast" });
+    const events = await collect(turn);
+    assert.equal(events.filter((event) => event.type === "service-tier.updated").length, 1);
+    await thread.run("Again").result;
+    assert.equal(children[0].requests("turn/start")[1].serviceTier, "ultrafast");
+  } finally {
+    await engine.close();
+  }
+});
+
+test("a model change clears the previous thread's tier acknowledgment", async () => {
+  const { spawn, children } = fakeSpawner(handlers({
+    "thread/start": () => ({ thread: { id: THREAD }, model: "gpt-6-luna", serviceTier: "priority" }),
+  }));
+  const engine = new CodexEngine({ spawnProcess: spawn });
+  try {
+    const thread = await engine.startThread({ cwd: "/tmp", fastMode: true });
+    const turn = thread.run("Hi", { model: "gpt-6.1-sol" });
+    const id = await turn.id;
+    assert.deepEqual(thread.serviceTier, { requested: "priority" });
+    children[0].notify("turn/completed", { threadId: THREAD, turn: { id, status: "completed", items: [], error: null } });
+    await turn.result;
+  } finally {
+    await engine.close();
+  }
+});
+
+test("reconnection reapplies the latest turn tier and emits a scoped mismatch warning", async () => {
+  const { spawn, children } = fakeSpawner(handlers({
+    "thread/start": () => ({ thread: { id: THREAD }, model: "gpt-6-luna", serviceTier: "priority" }),
+    "thread/resume": () => ({ thread: { id: THREAD }, model: "gpt-6-luna", serviceTier: null }),
+  }));
+  const engine = new CodexEngine({ spawnProcess: spawn });
+  try {
+    const thread = await engine.startThread({ cwd: "/tmp", fastMode: true });
+    const turn = thread.run("Hi", { serviceTier: "ultrafast" });
+    await turn.id;
+    children[0].exit();
+    assert.equal((await turn.result).error?.kind, "connection");
+    const events: AgentEvent[] = [];
+    thread.subscribe((event) => events.push(event));
+    const next = thread.run("Try again");
+    const id = await next.id;
+    assert.equal(children[1].requests("thread/resume")[0].serviceTier, "ultrafast");
+    assert.deepEqual(thread.serviceTier, { requested: "ultrafast", accepted: null, mismatch: true });
+    assert.ok(events.some((event) => event.type === "service-tier.updated" && event.scope === "thread" && event.serviceTier.mismatch));
+    assert.ok(events.some((event) => event.type === "notice" && event.kind === "warning" && event.message.includes("ultrafast")));
+    children[1].notify("turn/completed", { threadId: THREAD, turn: { id, status: "completed", items: [], error: null } });
+    const result = await next.result;
+    assert.deepEqual(result.serviceTier, { requested: "ultrafast" });
+    assert.ok(events.some((event) => event.type === "service-tier.updated" && event.scope === "turn" && event.serviceTier.accepted === undefined));
+  } finally {
+    await engine.close();
+  }
 });
 
 test("steer adds input to the running turn; after the turn ends it is rejected", async () => {
