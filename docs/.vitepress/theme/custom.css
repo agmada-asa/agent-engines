@@ -1,0 +1,448 @@
+/*
+ * Visual theme for the agent-engines docs.
+ * Light only: warm paper and near-black ink, one blue for links and focus,
+ * a condensed display face for headlines, and pill-shaped buttons.
+ * Variables come first; the rules below only cover what variables can't reach.
+ */
+
+:root {
+  color-scheme: light;
+
+  /* Palette */
+  --ae-paper: #f3f0e8;
+  --ae-panel: #fffdf8;
+  --ae-sand: #e7e0d3;
+  --ae-code: #ebe6da;
+  --ae-ink: #14130f;
+  --ae-ink-muted: #514e47;
+  --ae-ink-subtle: #6e6659;
+  --ae-blue: #286bf1;
+  --ae-blue-deep: #1e53cb;
+  --ae-blue-hover: #17459f;
+  --ae-blue-tint: rgb(40 107 241 / 0.12);
+  --ae-rule: rgb(20 19 15 / 0.22);
+  --ae-rule-soft: rgb(20 19 15 / 0.12);
+
+  /* Type */
+  --ae-font-body: "Instrument Sans Variable", "Instrument Sans", sans-serif;
+  --ae-font-display: "BBH Bartle", "Arial Black", sans-serif;
+
+  /* VitePress variables */
+  --vp-font-family-base: var(--ae-font-body);
+
+  --vp-c-bg: var(--ae-paper);
+  --vp-c-bg-alt: var(--ae-paper);
+  --vp-c-bg-elv: var(--ae-panel);
+  --vp-c-bg-soft: var(--ae-sand);
+  --vp-c-gutter: var(--ae-rule-soft);
+  --vp-c-divider: var(--ae-rule-soft);
+  --vp-c-border: var(--ae-rule);
+
+  --vp-c-text-1: var(--ae-ink);
+  --vp-c-text-2: var(--ae-ink-muted);
+  --vp-c-text-3: var(--ae-ink-subtle);
+
+  --vp-c-default-soft: rgb(20 19 15 / 0.06);
+  --vp-c-brand-1: var(--ae-blue-deep);
+  --vp-c-brand-2: var(--ae-blue-hover);
+  --vp-c-brand-3: var(--ae-blue);
+  --vp-c-brand-soft: var(--ae-blue-tint);
+
+  --vp-nav-bg-color: var(--ae-paper);
+  --vp-nav-screen-bg-color: var(--ae-paper);
+  --vp-sidebar-bg-color: var(--ae-paper);
+  --vp-local-nav-bg-color: var(--ae-paper);
+  --vp-backdrop-bg-color: rgb(20 19 15 / 0.4);
+
+  --vp-code-color: var(--ae-ink);
+  --vp-code-bg: rgb(20 19 15 / 0.06);
+  --vp-code-block-bg: var(--ae-code);
+  --vp-code-block-divider-color: var(--ae-rule-soft);
+  --vp-code-line-number-color: var(--ae-ink-subtle);
+  --vp-code-lang-color: var(--ae-ink-subtle);
+  --vp-code-copy-code-bg: var(--ae-panel);
+  --vp-code-copy-code-hover-bg: var(--ae-panel);
+  --vp-code-copy-code-border-color: var(--ae-rule-soft);
+  --vp-code-copy-code-hover-border-color: var(--ae-rule);
+
+  /* Primary buttons are ink, as on the site. Alternative buttons are outlines. */
+  --vp-button-brand-border: var(--ae-ink);
+  --vp-button-brand-text: var(--ae-paper);
+  --vp-button-brand-bg: var(--ae-ink);
+  --vp-button-brand-hover-border: #2c2a24;
+  --vp-button-brand-hover-text: var(--ae-paper);
+  --vp-button-brand-hover-bg: #2c2a24;
+  --vp-button-brand-active-border: #3a382f;
+  --vp-button-brand-active-text: var(--ae-paper);
+  --vp-button-brand-active-bg: #3a382f;
+
+  --vp-button-alt-border: rgb(20 19 15 / 0.35);
+  --vp-button-alt-text: var(--ae-ink);
+  --vp-button-alt-bg: transparent;
+  --vp-button-alt-hover-border: var(--ae-ink);
+  --vp-button-alt-hover-text: var(--ae-paper);
+  --vp-button-alt-hover-bg: var(--ae-ink);
+  --vp-button-alt-active-border: var(--ae-ink);
+  --vp-button-alt-active-text: var(--ae-paper);
+  --vp-button-alt-active-bg: var(--ae-ink);
+
+  /* Home hero: a small uppercase label above a large display headline */
+  --vp-home-hero-name-color: var(--ae-ink-subtle);
+  --vp-home-hero-name-background: none;
+
+  --vp-input-border-color: var(--ae-rule);
+  --vp-input-bg-color: var(--ae-panel);
+  --vp-local-search-bg: var(--ae-panel);
+  --vp-local-search-result-bg: var(--ae-panel);
+  --vp-local-search-result-border: var(--ae-rule-soft);
+  --vp-local-search-result-selected-bg: var(--ae-sand);
+  --vp-local-search-result-selected-border: var(--ae-blue-deep);
+  --vp-local-search-highlight-bg: var(--ae-blue-tint);
+  --vp-local-search-highlight-text: var(--ae-ink);
+}
+
+::selection {
+  background: rgb(40 107 241 / 0.22);
+  color: var(--ae-ink);
+}
+
+@media (prefers-reduced-motion: reduce) {
+  *,
+  *::before,
+  *::after {
+    animation-duration: 0.01ms !important;
+    animation-iteration-count: 1 !important;
+    transition-duration: 0.01ms !important;
+    scroll-behavior: auto !important;
+  }
+}
+
+/* Navigation bar: small uppercase wordmark, underlined current page */
+.VPNavBarTitle .title {
+  font-size: 15px;
+  font-weight: 650;
+  letter-spacing: -0.02em;
+  text-transform: uppercase;
+}
+
+.VPNav .VPNavBarMenuLink {
+  font-size: 14px;
+  font-weight: 500;
+  letter-spacing: -0.005em;
+  color: var(--ae-ink);
+}
+
+.VPNav .VPNavBarMenuLink:hover,
+.VPNav .VPNavBarMenuLink.active {
+  color: var(--ae-ink);
+}
+
+.VPNav .VPNavBarMenuLink.active {
+  text-decoration: underline;
+  text-underline-offset: 6px;
+}
+
+.VPNavBar:not(.home.top) {
+  border-bottom: 1px solid var(--ae-rule-soft);
+}
+
+/* Search: pill field with a hairline border */
+.VPNavBarSearch .DocSearch-Button {
+  height: 40px;
+  border: 1px solid var(--ae-rule);
+  border-radius: 999px;
+  background: transparent;
+  color: var(--ae-ink-muted);
+  transition: border-color 0.25s;
+}
+
+.VPNavBarSearch .DocSearch-Button:hover {
+  border-color: var(--ae-ink);
+  background: transparent;
+}
+
+.VPLocalSearchBox .shell {
+  border-radius: 22px;
+}
+
+.VPLocalSearchBox .search-bar {
+  border-radius: 999px;
+  border-color: var(--ae-rule);
+}
+
+.VPLocalSearchBox .search-bar:focus-within {
+  border-color: var(--ae-ink);
+}
+
+.VPLocalSearchBox .result {
+  border-radius: 14px;
+}
+
+/* Sidebar: uppercase group labels like the site's small section labels */
+.VPSidebar .VPSidebarItem.level-0 .text {
+  font-size: 12px;
+  font-weight: 550;
+  letter-spacing: 0.12em;
+  text-transform: uppercase;
+  color: var(--ae-ink-subtle);
+}
+
+.VPSidebar .VPSidebarItem.level-1 .text {
+  font-size: 15px;
+  letter-spacing: -0.01em;
+}
+
+.VPSidebar .VPSidebarItem.level-1.is-active > .item > .link > .text {
+  color: var(--ae-blue-deep);
+  font-weight: 600;
+}
+
+/* Document typography */
+.vp-doc h1 {
+  font-family: var(--ae-font-display);
+  font-size: clamp(22px, 3.1vw, 40px);
+  font-weight: 400;
+  line-height: 1.1;
+  letter-spacing: -0.035em;
+  text-transform: uppercase;
+  overflow-wrap: break-word;
+}
+
+.vp-doc h2 {
+  margin: 56px 0 18px;
+  padding-top: 28px;
+  border-top: 1px solid var(--ae-rule);
+  font-size: clamp(25px, 3vw, 34px);
+  font-weight: 550;
+  line-height: 1.14;
+  letter-spacing: -0.04em;
+}
+
+.vp-doc h3 {
+  font-size: clamp(20px, 2vw, 24px);
+  font-weight: 550;
+  line-height: 1.2;
+  letter-spacing: -0.035em;
+}
+
+.vp-doc h4 {
+  font-weight: 600;
+  letter-spacing: -0.02em;
+}
+
+.vp-doc p {
+  line-height: 1.7;
+}
+
+.vp-doc li {
+  line-height: 1.7;
+}
+
+.vp-doc blockquote {
+  border-left: 2px solid var(--ae-blue);
+  color: var(--ae-ink-muted);
+}
+
+.vp-doc a {
+  font-weight: 500;
+  text-decoration-thickness: 1px;
+  text-underline-offset: 5px;
+}
+
+/* Inline code and code blocks */
+.vp-doc :not(pre) > code {
+  border-radius: 6px;
+  font-weight: 500;
+}
+
+.vp-doc div[class*="language-"] {
+  border: 1px solid var(--ae-rule-soft);
+  border-radius: 18px;
+}
+
+/* Tables: hairlines and small uppercase headers, no zebra stripes */
+.vp-doc table {
+  font-size: 15px;
+  border-top: 1px solid var(--ae-rule);
+  border-bottom: 1px solid var(--ae-rule);
+}
+
+.vp-doc tr,
+.vp-doc tr:nth-child(2n) {
+  background-color: transparent;
+}
+
+.vp-doc th,
+.vp-doc td {
+  border: 0;
+  border-bottom: 1px solid var(--ae-rule-soft);
+  padding: 12px 16px 12px 0;
+  vertical-align: top;
+}
+
+.vp-doc th {
+  background-color: transparent;
+  font-size: 12px;
+  font-weight: 550;
+  letter-spacing: 0.12em;
+  text-transform: uppercase;
+  color: var(--ae-ink-subtle);
+  border-bottom-color: var(--ae-rule);
+}
+
+.vp-doc td {
+  font-size: 15px;
+}
+
+/* Links keep a visible focus ring, shaped like the site's */
+a:focus-visible {
+  outline: 2px solid var(--ae-blue-deep);
+  outline-offset: 5px;
+  border-radius: 2px;
+}
+
+/* Buttons: pills with the site's 13px semibold label */
+.VPHome .VPHero .VPButton {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  min-height: 44px;
+  padding: 10px 22px;
+  border-radius: 999px;
+  font-size: 13px;
+  font-weight: 600;
+  line-height: 1.2;
+  letter-spacing: -0.01em;
+}
+
+/* Home hero */
+.VPHome .VPHero {
+  position: relative;
+  isolation: isolate;
+  overflow: clip;
+}
+
+.VPHome .VPHero::before {
+  content: "";
+  position: absolute;
+  z-index: -1;
+  top: -18%;
+  right: -22%;
+  width: min(640px, 120vw);
+  aspect-ratio: 1;
+  border-radius: 50%;
+  background: radial-gradient(circle, rgb(40 107 241 / 0.32), transparent 65%);
+  filter: blur(40px);
+  pointer-events: none;
+}
+
+.VPHome .VPHero .name,
+.VPHome .VPHero .text {
+  max-width: 980px;
+  letter-spacing: -0.035em;
+  white-space: normal;
+}
+
+.VPHome .VPHero .name {
+  font-family: var(--ae-font-body);
+  font-size: 12px;
+  font-weight: 550;
+  line-height: 1.4;
+  letter-spacing: 0.12em;
+  text-transform: uppercase;
+}
+
+.VPHome .VPHero .text {
+  margin-top: 14px;
+  font-family: var(--ae-font-display);
+  font-size: clamp(30px, 8vw, 72px);
+  font-weight: 400;
+  line-height: 1.04;
+  text-transform: uppercase;
+  color: var(--ae-ink);
+}
+
+.VPHome .VPHero .tagline {
+  max-width: 590px;
+  padding-top: 24px;
+  font-size: clamp(16px, 1.4vw, 19px);
+  font-weight: 400;
+  line-height: 1.6;
+  color: var(--ae-ink-muted);
+}
+
+.VPHome .VPHero .actions {
+  gap: 12px 24px;
+  padding-top: 32px;
+}
+
+/* Home features: hairline columns with a headline and body copy */
+.VPHome .VPFeatures .VPFeature {
+  border: 0;
+  border-top: 1px solid var(--ae-rule);
+  border-radius: 0;
+  background-color: transparent;
+  transition: border-color 0.25s;
+}
+
+.VPHome .VPFeatures .VPFeature.link:hover {
+  border-color: transparent;
+  border-top-color: var(--ae-blue-deep);
+}
+
+.VPHome .VPFeatures .VPFeature .box {
+  padding: 28px 0 0;
+}
+
+.VPHome .VPFeatures .VPFeature .title {
+  font-size: clamp(20px, 2vw, 24px);
+  font-weight: 550;
+  line-height: 1.2;
+  letter-spacing: -0.035em;
+  color: var(--ae-ink);
+}
+
+.VPHome .VPFeatures .VPFeature .details {
+  padding-top: 14px;
+  font-size: 16px;
+  line-height: 1.7;
+  color: var(--ae-ink-muted);
+}
+
+/* Footer and previous/next links */
+.VPFooter {
+  font-size: 13px;
+  color: var(--ae-ink-subtle);
+}
+
+.VPDocFooter .pager-link {
+  border-radius: 18px;
+  border-color: var(--ae-rule-soft);
+  transition: border-color 0.25s;
+}
+
+.VPDocFooter .pager-link:hover {
+  border-color: var(--ae-ink);
+}
+
+@media (max-width: 767px) {
+  .VPHome .VPHero {
+    padding-inline: 20px;
+  }
+
+  .VPHome .VPHero .actions {
+    padding-top: 24px;
+  }
+
+  .VPHome .VPHero .actions .action {
+    flex: 1 1 100%;
+  }
+
+  .VPHome .VPHero .VPButton {
+    width: 100%;
+  }
+
+  .VPHome .VPFeatures .VPFeature .box {
+    padding-top: 24px;
+  }
+}
