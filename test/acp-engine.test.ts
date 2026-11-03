@@ -899,6 +899,69 @@ test("two options with the same name can each be chosen", async () => {
   await engine.close();
 });
 
+test("option labels cannot collide with a generated duplicate label", async () => {
+  const options = [
+    { optionId: "1", name: "Same", kind: "allow_once" },
+    { optionId: "2", name: "Same (3)", kind: "allow_once" },
+    { optionId: "3", name: "Same", kind: "allow_once" },
+    { optionId: "4", name: "Same (3) (2)", kind: "allow_once" },
+  ];
+  for (let index = 0; index < options.length; index++) {
+    const answers: unknown[] = [];
+    const { engine } = engineWith({ "session/prompt": questionPrompt(answers, options) });
+    try {
+      const thread = await engine.startThread({ cwd: CWD, access: "ask" });
+      await askAndAnswer(thread, (asked) => {
+        const labels = asked.questions[0]!.options.map((option) => option.label);
+        assert.equal(labels.length, options.length);
+        assert.equal(new Set(labels).size, options.length);
+        return { [asked.id]: [labels[index]!] };
+      });
+      assert.deepEqual(answers, [{ outcome: { outcome: "selected", optionId: options[index]!.optionId } }]);
+    } finally {
+      await engine.close();
+    }
+  }
+});
+
+test("questions arriving after interrupt cannot start a follow-up prompt", async () => {
+  const prompts: string[] = [];
+  const answers: unknown[] = [];
+  const { engine } = engineWith({
+    "session/prompt": async (params, server) => {
+      prompts.push(params.prompt[0].text);
+      if (prompts.length === 1) {
+        for (const toolCallId of ["first", "late"]) {
+          answers.push(await server.ask("session/request_permission", {
+            sessionId: params.sessionId, toolCall: { ...QUESTION_CALL, toolCallId }, options: QUESTION_OPTIONS,
+          }));
+        }
+      }
+      return { stopReason: "end_turn" };
+    },
+  });
+  try {
+    const thread = await engine.startThread({ cwd: CWD, access: "ask" });
+    const turn = thread.run("Ask me");
+    const surfaced: string[] = [];
+    for await (const event of turn) {
+      if (event.type !== "request") continue;
+      surfaced.push(event.request.id);
+      if (surfaced.length === 1) await turn.interrupt();
+      else await (event.request as QuestionRequest).respond({ [event.request.id]: ["Purple"] });
+    }
+    assert.equal((await turn.result).status, "interrupted");
+    assert.deepEqual(prompts, ["Ask me"]);
+    assert.deepEqual(surfaced, ["first"]);
+    assert.deepEqual(answers, [
+      { outcome: { outcome: "cancelled" } },
+      { outcome: { outcome: "cancelled" } },
+    ]);
+  } finally {
+    await engine.close();
+  }
+});
+
 test("interrupt() cancels a question nobody has answered", async () => {
   const answers: unknown[] = [];
   const { engine, agent } = engineWith({

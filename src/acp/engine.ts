@@ -541,9 +541,17 @@ interface QuestionAnswers {
 function optionQuestion(id: string, question: string, options: readonly Json[], raw: unknown, answers: QuestionAnswers): AgentRequest {
   // Answers come back by label, so two options with one name must not share a label.
   const optionIds = new Map<string, string>();
+  const names = new Set(options.map((option) => String(option.name ?? option.optionId)));
   for (const option of options) {
     const name = String(option.name ?? option.optionId);
-    optionIds.set(optionIds.has(name) ? `${name} (${option.optionId})` : name, String(option.optionId));
+    let label = name;
+    if (optionIds.has(label)) {
+      const base = `${name} (${option.optionId})`;
+      label = base;
+      let suffix = 2;
+      while (optionIds.has(label) || names.has(label)) label = `${base} (${suffix++})`;
+    }
+    optionIds.set(label, String(option.optionId));
   }
   const labels = [...optionIds.keys()];
   return {
@@ -710,6 +718,7 @@ class AcpThread implements Thread {
         for (;;) {
           const response = await client.request<Json>("session/prompt", { sessionId: this.id, prompt }, { timeoutMs: 0 });
           if (turn.done || this.current !== turn) return;
+          if (this.interrupting) return this.finish(turn, { status: "interrupted" });
           const followUp = this.followUp;
           this.followUp = undefined;
           if (followUp !== undefined) {
@@ -717,7 +726,6 @@ class AcpThread implements Thread {
             continue;
           }
           const stopReason = String(response?.stopReason ?? "end_turn");
-          if (this.interrupting) return this.finish(turn, { status: "interrupted" });
           return this.settle(turn, stopReason);
         }
       } catch (error) {
@@ -877,6 +885,8 @@ class AcpThread implements Thread {
     const id = String(call.toolCallId ?? randomUUID());
     const question = questionAsked(call, this.normalizer.announcedTool(id), options);
     for (const event of this.normalizer.permissionAsked(id, question !== undefined)) this.dispatch(event);
+    // Cancellation can race another request from the same prompt. Do not reopen it.
+    if (this.interrupting && this.current && !this.current.done) return Promise.resolve({ outcome: { outcome: "cancelled" } });
     const pick = (...kinds: string[]) => {
       for (const kind of kinds) {
         const option = options.find((entry) => entry.kind === kind);
