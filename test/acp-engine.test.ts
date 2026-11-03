@@ -8,7 +8,7 @@ import { test } from "node:test";
 import { AcpEngine, type AcpEngineOptions } from "../src/acp/engine.ts";
 import { AcpNormalizer } from "../src/acp/normalize.ts";
 import { AgentEngineError, SteerRejectedError, UnsupportedFeatureError } from "../src/errors.ts";
-import type { AgentEvent, AgentRequest, ApprovalRequest, PortableTranscript, QuestionRequest, Thread, Turn } from "../src/types.ts";
+import type { AgentEvent, AgentRequest, ApprovalRequest, ElicitationRequest, PortableTranscript, QuestionRequest, Thread, Turn } from "../src/types.ts";
 import { until } from "./fake-app-server.ts";
 import { type AcpHandler, FakeAcpAgent, FakeRpcError, NO_REPLY, fakeAcpSpawner } from "./fake-acp-agent.ts";
 
@@ -481,8 +481,8 @@ test("an agent's question surfaces with every option, and each option can be cho
       header: "",
       question: "Which colour?",
       options: [{ label: "Red", description: "" }, { label: "Green", description: "" }, { label: "Blue", description: "" }],
-      multiSelect: false,
-      allowOther: false,
+      multiSelect: true,
+      allowOther: true,
       secret: false,
     }]);
     assert.deepEqual((question?.raw as { options: unknown }).options, QUESTION_OPTIONS);
@@ -525,7 +525,7 @@ test("an empty answer declines a question", async () => {
   await engine.close();
 });
 
-test("an answer that is not one option is refused and the question stays open", async () => {
+test("an answer that says nothing is refused and the question stays open", async () => {
   const answers: unknown[] = [];
   const { engine } = engineWith({ "session/prompt": questionPrompt(answers) });
   const thread = await engine.startThread({ cwd: CWD, access: "ask" });
@@ -533,7 +533,7 @@ test("an answer that is not one option is refused and the question stays open", 
     if (event.type !== "request") continue;
     const question = event.request as QuestionRequest;
     const id = question.questions[0]!.id;
-    for (const wrong of [{ [id]: ["Purple"] }, { [id]: ["Red", "Blue"] }, { [id]: [] }, { "another-question": ["Red"] }]) {
+    for (const wrong of [{ [id]: [] }, { [id]: [""] }, { [id]: ["  "] }, { "another-question": ["Red"] }]) {
       await assert.rejects(question.respond(wrong), AgentEngineError);
     }
     assert.deepEqual(answers, []);
@@ -541,6 +541,348 @@ test("an answer that is not one option is refused and the question stays open", 
   }
   assert.deepEqual(answers, [{ outcome: { outcome: "selected", optionId: "2" } }]);
   await engine.close();
+});
+
+/** A prompt that asks once, then replies; the prompt after that replies with what it was told. */
+function followUpPrompt(answers: unknown[], order: string[] = []): AcpHandler {
+  return async (params, server) => {
+    const text = params.prompt[0].text as string;
+    order.push(text);
+    if (text !== "Ask me") {
+      server.update(params.sessionId, { sessionUpdate: "agent_message_chunk", content: { type: "text", text: `Noted: ${text}` } });
+      return { stopReason: "end_turn" };
+    }
+    server.update(params.sessionId, { sessionUpdate: "tool_call", ...QUESTION_CALL });
+    answers.push(await server.ask("session/request_permission", { sessionId: params.sessionId, toolCall: QUESTION_CALL, options: QUESTION_OPTIONS }));
+    server.update(params.sessionId, { sessionUpdate: "tool_call_update", toolCallId: QUESTION_CALL.toolCallId, status: "failed", rawOutput: "Interaction cancelled" });
+    // Antigravity says this as agent text when a prompt is cancelled.
+    server.update(params.sessionId, { sessionUpdate: "agent_message_chunk", content: { type: "text", text: "context canceled" } });
+    return { stopReason: "cancelled" };
+  };
+}
+
+for (const [name, given, words] of [
+  ["free text", ["Purple"], "Purple"],
+  ["several labels", ["Red", "Blue"], "Red, Blue"],
+] as const) {
+  test(`${name} declines the options and reaches the agent as the next prompt, in the same turn`, async () => {
+    const answers: unknown[] = [];
+    const order: string[] = [];
+    const { engine, agent } = engineWith({ "session/prompt": followUpPrompt(answers, order) });
+    const thread = await engine.startThread({ cwd: CWD, access: "full" });
+    const events: AgentEvent[] = [];
+    const turn = thread.run("Ask me");
+    for await (const event of turn) {
+      events.push(event);
+      if (event.type !== "request") continue;
+      const question = event.request as QuestionRequest;
+      assert.equal(question.questions[0]?.allowOther, true);
+      await question.respond({ [question.questions[0]!.id]: [...given] });
+    }
+    const result = await turn.result;
+    const reply = `Noted: Answer to your question "Which colour?": ${words}`;
+    assert.equal(result.status, "completed");
+    assert.equal(result.text, reply);
+    assert.deepEqual(order, ["Ask me", `Answer to your question "Which colour?": ${words}`]);
+    assert.deepEqual(answers, [{ outcome: { outcome: "cancelled" } }]);
+    assert.equal(agent().notifications("session/cancel").length, 0);
+    assert.equal(ofType(events, "turn.started").length, 1);
+    assert.equal(ofType(events, "turn.completed").length, 1);
+    assert.deepEqual((await thread.history()).at(-1)?.entries, [
+      { kind: "message", role: "user", text: "Ask me" },
+      { kind: "message", role: "assistant", text: "Which colour?" },
+      { kind: "message", role: "user", text: words },
+      { kind: "message", role: "assistant", text: reply },
+    ]);
+    await engine.close();
+  });
+}
+
+test("an error after a free-text answer fails the turn without retrying", async () => {
+  const order: string[] = [];
+  const { engine } = engineWith({
+    "session/prompt": async (params, server) => {
+      order.push(params.prompt[0].text);
+      if (order.length > 1) {
+        server.update(params.sessionId, { sessionUpdate: "agent_message_chunk", content: { type: "text", text: "Purple" } });
+        return { stopReason: "end_turn" };
+      }
+      await server.ask("session/request_permission", { sessionId: params.sessionId, toolCall: QUESTION_CALL, options: QUESTION_OPTIONS });
+      throw new FakeRpcError(-32603, "cancelled");
+    },
+  });
+  const thread = await engine.startThread({ cwd: CWD, access: "ask" });
+  const turn = thread.run("Ask me");
+  for await (const event of turn) {
+    if (event.type === "request") await (event.request as QuestionRequest).respond({ interaction_1: ["Purple"] });
+  }
+  assert.equal((await turn.result).status, "failed");
+  assert.equal(order.length, 1);
+  await engine.close();
+});
+
+
+test("free-text answers to sequential questions are delivered together without retries", async () => {
+  const prompts: string[] = [];
+  const { engine } = engineWith({
+    "session/prompt": async (params, server) => {
+      prompts.push(params.prompt[0].text);
+      if (prompts.length > 1) {
+        server.update(params.sessionId, { sessionUpdate: "agent_message_chunk", content: { type: "text", text: "Noted" } });
+        return { stopReason: "end_turn" };
+      }
+      for (const id of ["first", "second"]) {
+        await server.ask("session/request_permission", {
+          sessionId: params.sessionId,
+          toolCall: { ...QUESTION_CALL, toolCallId: id, title: `${id}?` },
+          options: QUESTION_OPTIONS,
+        });
+      }
+      return { stopReason: "end_turn" };
+    },
+  });
+  const thread = await engine.startThread({ cwd: CWD, access: "full" });
+  for await (const event of thread.run("Ask me")) {
+    if (event.type !== "request") continue;
+    const question = event.request as QuestionRequest;
+    const answer = { [question.id]: ["Purple"] };
+    await question.respond(answer);
+    await question.respond(answer);
+  }
+  assert.deepEqual(prompts, ["Ask me", 'Answer to your question "first?": Purple\nAnswer to your question "second?": Purple']);
+  await engine.close();
+});
+
+test("a first prompt that ends with no output is not sent again", async () => {
+  const order: string[] = [];
+  const { engine } = engineWith({
+    "session/prompt": (params) => {
+      order.push(params.prompt[0].text);
+      return { stopReason: "end_turn" };
+    },
+  });
+  const thread = await engine.startThread({ cwd: CWD, access: "ask" });
+  assert.equal((await thread.run("Hi").result).status, "completed");
+  assert.deepEqual(order, ["Hi"]);
+  await engine.close();
+});
+
+test("a prompt error with no follow-up waiting still fails the turn", async () => {
+  const { engine } = engineWith({ "session/prompt": () => { throw new FakeRpcError(-32603, "boom"); } });
+  const thread = await engine.startThread({ cwd: CWD, access: "ask" });
+  assert.equal((await thread.run("Hi").result).status, "failed");
+  await engine.close();
+});
+
+test("interrupting right after a free-text answer sends no follow-up", async () => {
+  const order: string[] = [];
+  const { engine } = engineWith({ "session/prompt": followUpPrompt([], order) });
+  const thread = await engine.startThread({ cwd: CWD, access: "ask" });
+  const turn = thread.run("Ask me");
+  for await (const event of turn) {
+    if (event.type !== "request") continue;
+    await (event.request as QuestionRequest).respond({ interaction_1: ["Purple"] });
+    await turn.interrupt();
+  }
+  assert.equal((await turn.result).status, "interrupted");
+  assert.deepEqual(order, ["Ask me"]);
+  await engine.close();
+});
+
+test("a question asked outside a turn offers only its options", async () => {
+  const answers: unknown[] = [];
+  const { engine, agent } = engineWith();
+  const thread = await engine.startThread({ cwd: CWD, access: "ask" });
+  const events: AgentEvent[] = [];
+  thread.subscribe((event) => events.push(event));
+  const asking = agent().ask("session/request_permission", { sessionId: thread.id, toolCall: QUESTION_CALL, options: QUESTION_OPTIONS }).then((answer) => answers.push(answer));
+  await until(() => events.some((event) => event.type === "request"));
+  const question = ofType(events, "request")[0]!.request as QuestionRequest;
+  assert.equal(question.questions[0]?.allowOther, false);
+  await assert.rejects(question.respond({ interaction_1: ["Purple"] }), AgentEngineError);
+  await question.respond({ interaction_1: ["Red"] });
+  await asking;
+  assert.deepEqual(answers, [{ outcome: { outcome: "selected", optionId: "1" } }]);
+  await engine.close();
+});
+
+test("several questions in a row each surface and are each answered", async () => {
+  const answers: unknown[] = [];
+  const { engine } = engineWith({
+    "session/prompt": async (params, server) => {
+      for (const [toolCallId, title] of [["interaction_a", "First?"], ["interaction_b", "Second?"]]) {
+        const toolCall = { toolCallId, title, status: "pending", rawInput: {} };
+        server.update(params.sessionId, { sessionUpdate: "tool_call", ...toolCall });
+        answers.push(await server.ask("session/request_permission", { sessionId: params.sessionId, toolCall, options: QUESTION_OPTIONS }));
+        server.update(params.sessionId, { sessionUpdate: "tool_call_update", toolCallId, status: "completed", rawOutput: "Response received" });
+      }
+      return { stopReason: "end_turn" };
+    },
+  });
+  const thread = await engine.startThread({ cwd: CWD, access: "full" });
+  const labels = ["Green", "Blue"];
+  const questions = await askAndAnswer(thread, (asked) => ({ [asked.questions[0]!.id]: [labels.shift()!] }));
+  assert.deepEqual(questions.map((question) => question.questions[0]?.question), ["First?", "Second?"]);
+  assert.deepEqual(answers, [{ outcome: { outcome: "selected", optionId: "2" } }, { outcome: { outcome: "selected", optionId: "3" } }]);
+  await engine.close();
+});
+
+test("a question's placeholder tool call reaches neither the events nor the history as a tool", async () => {
+  const { engine } = engineWith({ "session/prompt": questionPrompt([]) });
+  const thread = await engine.startThread({ cwd: CWD, access: "ask" });
+  const events: AgentEvent[] = [];
+  for await (const event of thread.run("Ask me")) {
+    events.push(event);
+    if (event.type === "request") await (event.request as QuestionRequest).respond({ interaction_1: ["Green"] });
+  }
+  assert.deepEqual(events.filter((event) => event.type.startsWith("tool.")), []);
+  assert.deepEqual((await thread.history()).at(-1)?.entries, [
+    { kind: "message", role: "user", text: "Ask me" },
+    { kind: "message", role: "assistant", text: "Which colour?" },
+    { kind: "message", role: "user", text: "Green" },
+  ]);
+  await engine.close();
+});
+
+test("a declined question stays out of the tool events and is in the history unanswered", async () => {
+  const { engine } = engineWith({ "session/prompt": questionPrompt([]) });
+  const thread = await engine.startThread({ cwd: CWD, access: "ask" });
+  const events: AgentEvent[] = [];
+  for await (const event of thread.run("Ask me")) {
+    events.push(event);
+    if (event.type === "request") await (event.request as QuestionRequest).respond({});
+  }
+  assert.deepEqual(events.filter((event) => event.type.startsWith("tool.")), []);
+  assert.deepEqual((await thread.history()).at(-1)?.entries, [
+    { kind: "message", role: "user", text: "Ask me" },
+    { kind: "message", role: "assistant", text: "Which colour?" },
+  ]);
+  await engine.close();
+});
+
+test("text before a question is closed ahead of the request", async () => {
+  const { engine } = engineWith({
+    "session/prompt": async (params, server) => {
+      server.update(params.sessionId, { sessionUpdate: "agent_message_chunk", content: { type: "text", text: "Hm." } });
+      await server.ask("session/request_permission", { sessionId: params.sessionId, toolCall: QUESTION_CALL, options: QUESTION_OPTIONS });
+      return { stopReason: "end_turn" };
+    },
+  });
+  const thread = await engine.startThread({ cwd: CWD, access: "ask" });
+  const types: string[] = [];
+  for await (const event of thread.run("Ask me")) {
+    types.push(event.type);
+    if (event.type === "request") await (event.request as QuestionRequest).respond({ interaction_1: ["Red"] });
+  }
+  assert.deepEqual(types, ["turn.started", "text.delta", "text.done", "request", "turn.completed"]);
+  await engine.close();
+});
+
+/** The tool events and requests of a turn on a bare call, in order. */
+async function bareCallOrder(prompt: AcpHandler, access: "ask" | "full"): Promise<string[]> {
+  const { engine } = engineWith({ "session/prompt": prompt });
+  const thread = await engine.startThread({ cwd: CWD, access });
+  const order: string[] = [];
+  for await (const event of thread.run("Do it")) {
+    if (event.type === "request") {
+      order.push(event.request.kind);
+      await (event.request as ApprovalRequest).respond({ decision: "allow" });
+    } else if (event.type.startsWith("tool.")) order.push(event.type);
+  }
+  await engine.close();
+  return order;
+}
+
+const BARE_ANNOUNCEMENT = { sessionUpdate: "tool_call", toolCallId: "call-1", title: "Do it", status: "pending", rawInput: {} };
+
+test("a bare tool call that is no question starts before its approval", async () => {
+  const prompt: AcpHandler = async (params, server) => {
+    server.update(params.sessionId, BARE_ANNOUNCEMENT);
+    await server.ask("session/request_permission", { sessionId: params.sessionId, toolCall: { toolCallId: "call-1", title: "Do it", kind: "execute" }, options: [{ optionId: "a", name: "Allow", kind: "allow_once" }, { optionId: "no", name: "No", kind: "reject_once" }] });
+    server.update(params.sessionId, { sessionUpdate: "tool_call_update", toolCallId: "call-1", status: "completed" });
+    return { stopReason: "end_turn" };
+  };
+  assert.deepEqual(await bareCallOrder(prompt, "ask"), ["tool.started", "approval", "tool.completed"]);
+  assert.deepEqual(await bareCallOrder(prompt, "full"), ["tool.started", "tool.completed"]);
+});
+
+for (const [name, patch] of [
+  ["running", { status: "in_progress" }],
+  ["naming its kind", { kind: "read" }],
+  ["giving its input", { rawInput: { path: "x" } }],
+] as const) {
+  test(`a bare tool call starts on a patch ${name}`, async () => {
+    const order = await bareCallOrder(async (params, server) => {
+      server.update(params.sessionId, BARE_ANNOUNCEMENT);
+      server.update(params.sessionId, { sessionUpdate: "tool_call_update", toolCallId: "call-1", ...patch });
+      server.update(params.sessionId, { sessionUpdate: "tool_call_update", toolCallId: "call-1", status: "completed" });
+      return { stopReason: "end_turn" };
+    }, "ask");
+    assert.deepEqual(order, ["tool.started", "tool.completed"]);
+  });
+}
+
+test("a bare tool call that finishes unasked starts and completes", async () => {
+  const order = await bareCallOrder(async (params, server) => {
+    server.update(params.sessionId, BARE_ANNOUNCEMENT);
+    server.update(params.sessionId, { sessionUpdate: "tool_call_update", toolCallId: "call-1", status: "completed" });
+    return { stopReason: "end_turn" };
+  }, "ask");
+  assert.deepEqual(order, ["tool.started", "tool.completed"]);
+});
+
+test("a bare tool call left pending when the turn ends starts and is cancelled", async () => {
+  const order = await bareCallOrder(async (params, server) => {
+    server.update(params.sessionId, BARE_ANNOUNCEMENT);
+    return { stopReason: "end_turn" };
+  }, "ask");
+  assert.deepEqual(order, ["tool.started", "tool.completed"]);
+});
+
+test("a question on a call already reported as running keeps that call's events paired", async () => {
+  const running = { ...QUESTION_CALL, status: "in_progress" };
+  const order: string[] = [];
+  const { engine } = engineWith({ "session/prompt": questionPrompt([], QUESTION_OPTIONS, QUESTION_CALL, running) });
+  const thread = await engine.startThread({ cwd: CWD, access: "ask" });
+  for await (const event of thread.run("Ask me")) {
+    if (event.type === "request") {
+      order.push(event.request.kind);
+      await (event.request as QuestionRequest).respond({ interaction_1: ["Red"] });
+    } else if (event.type.startsWith("tool.")) order.push(event.type);
+  }
+  assert.deepEqual(order, ["tool.started", "question", "tool.completed"]);
+  await engine.close();
+});
+
+test("a form elicitation with several fields and a multi-select reaches the caller at every access level", async () => {
+  const schema = {
+    type: "object",
+    properties: {
+      colours: { type: "array", items: { enum: ["Red", "Green"] } },
+      note: { type: "string" },
+    },
+  };
+  for (const access of ["full", "accept-edits", "ask", "read-only"] as const) {
+    const answers: unknown[] = [];
+    const { engine } = engineWith({
+      "session/prompt": async (params, server) => {
+        answers.push(await server.ask("elicitation/create", { sessionId: params.sessionId, message: "Choose", mode: "form", requestedSchema: schema }));
+        return { stopReason: "end_turn" };
+      },
+    });
+    const thread = await engine.startThread({ cwd: CWD, access });
+    const content = { colours: ["Red", "Green"], note: "both" };
+    for await (const event of thread.run("Ask me")) {
+      if (event.type !== "request") continue;
+      assert.equal(event.request.kind, "elicitation", access);
+      const elicitation = event.request as ElicitationRequest;
+      assert.equal(elicitation.mode, "form", access);
+      assert.deepEqual(elicitation.schema, schema, access);
+      await elicitation.respond({ action: "accept", content });
+    }
+    assert.deepEqual(answers, [{ action: "accept", content }], access);
+    await engine.close();
+  }
 });
 
 test("two options with the same name can each be chosen", async () => {

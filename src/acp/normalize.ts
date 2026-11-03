@@ -37,6 +37,13 @@ export function acpTool(call: Json): ToolCall {
   };
 }
 
+/** Whether a tool call's fields name no operation: no kind, input, name, locations or content. */
+export function namesNoOperation(fields: Json): boolean {
+  return fields.kind == null && [fields.rawInput, fields.name, fields.locations, fields.content].every(
+    (value) => value == null || (typeof value === "object" && Object.keys(value).length === 0),
+  );
+}
+
 /** A tool call's text output: its content blocks, else its raw output. */
 function toolOutput(call: Json): string | undefined {
   const text = (Array.isArray(call.content) ? call.content : [])
@@ -93,6 +100,7 @@ export class AcpNormalizer {
   readonly turns: HistoryTurn[] = [];
   private open?: { kind: "text" | "reasoning"; id: string; messageId?: string; text: string };
   private readonly tools = new Map<string, Json>();
+  private readonly started = new Set<string>();
   private readonly finished = new Set<string>();
   private counter = 0;
   private entries: TranscriptEntry[] = [];
@@ -118,6 +126,30 @@ export class AcpNormalizer {
     return this.tools.get(id);
   }
 
+  /**
+   * A permission request settles what a call held back by `toolCall` is. A question
+   * is no tool, so it and any later patch to it go unreported; anything else starts
+   * now, ahead of its request. A call already reported stays reported.
+   */
+  permissionAsked(id: string, question: boolean): AgentEvent[] {
+    if (this.started.has(id)) return [];
+    if (question) {
+      this.tools.delete(id);
+      this.finished.add(id);
+      return this.closeOpen();
+    }
+    const call = this.tools.get(id);
+    if (!call) return [];
+    this.started.add(id);
+    return [{ ...this.base(), type: "tool.started", itemId: id, tool: acpTool(call) }];
+  }
+
+  /** Records a question and its answer in the turn, as the exchange they were. */
+  questionAnswered(question: string, answer: string | undefined): void {
+    this.entries.push({ kind: "message", role: "assistant", text: question });
+    if (answer !== undefined) this.entries.push({ kind: "message", role: "user", text: answer });
+  }
+
   /** Closes the current turn: any open message ends, and the turn joins the history. */
   endTurn(status: HistoryTurn["status"]): AgentEvent[] {
     const events = this.closeOpen();
@@ -125,10 +157,12 @@ export class AcpNormalizer {
     for (const [id, call] of this.tools) {
       const tool = acpTool(call);
       this.finished.add(id);
+      if (!this.started.has(id)) events.push({ ...this.base(), type: "tool.started", itemId: id, tool });
       events.push({ ...this.base(), type: "tool.completed", itemId: id, tool, output: "Cancelled when the turn ended.", isError: true });
       this.entries.push({ kind: "tool", tool, output: "Cancelled when the turn ended.", isError: true });
     }
     this.tools.clear();
+    this.started.clear();
     if (this.turnId) this.turns.push({ id: this.turnId, status, entries: this.entries });
     this.entries = [];
     this.turnId = "";
@@ -258,14 +292,19 @@ export class AcpNormalizer {
     const id = String(update.toolCallId);
     // A late patch to a call that has already finished changes nothing shown.
     if (this.finished.has(id)) return [];
-    const known = this.tools.get(id);
-    const merged: Json = { ...known };
+    const merged: Json = { ...this.tools.get(id) };
     for (const [key, value] of Object.entries(update)) if (value !== undefined && value !== null) merged[key] = value;
     this.tools.set(id, merged);
     const events: AgentEvent[] = [];
     const tool = acpTool(merged);
-    if (!known) events.push({ ...this.base(), type: "tool.started", itemId: id, tool });
     const status = merged.status;
+    // A pending call that names no operation may be the placeholder for a question,
+    // so it is not reported until something shows it is a tool (see `permissionAsked`).
+    const undecided = (status == null || status === "pending") && namesNoOperation(merged);
+    if (!undecided && !this.started.has(id)) {
+      this.started.add(id);
+      events.push({ ...this.base(), type: "tool.started", itemId: id, tool });
+    }
     if ((status === "completed" || status === "failed") && !this.finished.has(id)) {
       this.finished.add(id);
       const output = toolOutput(merged);
@@ -278,6 +317,7 @@ export class AcpNormalizer {
         this.entries.push({ kind: "files", changes });
       }
       this.tools.delete(id);
+      this.started.delete(id);
     }
     return events;
   }

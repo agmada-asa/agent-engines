@@ -339,7 +339,10 @@ if (status.updateOffered) {
 
 - ACP has no steering, so `steer` throws `SteerRejectedError`; there is no compaction, rewind or structured output.
 - Permission requests surface as `request` events. `access: "full"` allows each one once without asking, `read-only` refuses, `accept-edits` allows edits and asks about the rest.
-- Some agents, such as Antigravity, ask multiple-choice questions through the same protocol request. One with two or more options that are all `allow_once`, and no tool kind, input, name, locations or content, is a `question` at every access level, so answer it with an option's label; an empty answer cancels it. A question sent any other way, such as with a reject option, can't be told from an approval and stays one.
+- Some agents, such as Antigravity, ask questions through permission requests. A request with two or more options, all `allow_once`, a title, and no tool kind, input, name, locations or content is a `question` at every access level. The same rule checks the earlier tool announcement. Its pending placeholder produces no `tool.*` events; the question and answer appear as messages in live `history()`. A call already announced as running keeps its tool events paired.
+- An exact option label returns that option ID. An empty answer declines. During a running turn, `allowOther` and `multiSelect` are true: free text or several labels decline the option request, wait for the prompt to finish, and go as the next prompt within the same turn. The interim agent text is hidden. This is a prompt fallback, not native structured multi-select: Antigravity discards its multi-select flag and sends several questions as sequential requests. The agent can continue after the declined request before receiving the words. Outside a running turn, only one option can be returned.
+- Requests with a reject option or tool data remain approvals because their intent is ambiguous. Agents needing several fields or structured multi-select can use `elicitation`, which preserves the schema and answers at every access level.
+- A pending tool call that names no operation is held back until a request, a patch or the end of the turn shows it is a tool, so its `tool.started` can come later than the agent announced it.
 - Resuming loads the session, which replays its history into `history()`. `models()` and `commands()` open a session in a temporary folder when no thread is open, and the agent may keep it in its own list.
 - File reads, writes and terminals stay with the agent: the engine does not offer the client file system or terminal.
 
@@ -354,6 +357,8 @@ AGENT_ENGINES_LIVE=1 npm run test:live   # real turns on cheap models, in a /tmp
 ```
 
 The live tests run a steered turn, an interrupted turn, a resume, a compaction and a delete on each runtime, plus a Claude question round trip. A second scenario checks plan mode, structured output, context usage, history, rename, fork, rewind with files, a handoff seed and a review. Override the models with `AGENT_ENGINES_CLAUDE_MODEL` and `AGENT_ENGINES_CODEX_MODEL`.
+
+The Antigravity questions test also needs `AGENT_ENGINES_ANTIGRAVITY_COMMAND`, the path to a signed-in `agy_acp_server.par`, and skips without it. It adds one session to Antigravity's history on each run, and its model decides when to call its tools, so a failure can mean the model didn't ask.
 
 ## Licence
 
