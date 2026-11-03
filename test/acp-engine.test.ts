@@ -8,7 +8,7 @@ import { test } from "node:test";
 import { AcpEngine, type AcpEngineOptions } from "../src/acp/engine.ts";
 import { AcpNormalizer } from "../src/acp/normalize.ts";
 import { AgentEngineError, SteerRejectedError, UnsupportedFeatureError } from "../src/errors.ts";
-import type { AgentEvent, ApprovalRequest, PortableTranscript, Turn } from "../src/types.ts";
+import type { AgentEvent, AgentRequest, ApprovalRequest, PortableTranscript, QuestionRequest, Thread, Turn } from "../src/types.ts";
 import { until } from "./fake-app-server.ts";
 import { type AcpHandler, FakeAcpAgent, FakeRpcError, NO_REPLY, fakeAcpSpawner } from "./fake-acp-agent.ts";
 
@@ -438,6 +438,204 @@ test("accept-edits allows an edit on its own but still surfaces a command", asyn
   ]);
   await engine.close();
 });
+
+const QUESTION_CALL = { toolCallId: "interaction_1", status: "pending", title: "Which colour?", rawInput: {} };
+const QUESTION_OPTIONS = [
+  { optionId: "1", name: "Red", kind: "allow_once" },
+  { optionId: "2", name: "Green", kind: "allow_once" },
+  { optionId: "3", name: "Blue", kind: "allow_once" },
+];
+
+/** A prompt that asks as Antigravity does: announces a tool call, asks permission on it, then finishes it. */
+function questionPrompt(answers: unknown[], options: unknown[] = QUESTION_OPTIONS, toolCall: Record<string, unknown> = QUESTION_CALL, announced: Record<string, unknown> = toolCall): AcpHandler {
+  return async (params, server) => {
+    server.update(params.sessionId, { sessionUpdate: "tool_call", ...announced });
+    answers.push(await server.ask("session/request_permission", { sessionId: params.sessionId, toolCall, options }));
+    server.update(params.sessionId, { sessionUpdate: "tool_call_update", toolCallId: toolCall.toolCallId, status: "completed" });
+    return { stopReason: "end_turn" };
+  };
+}
+
+/** Runs one turn, answers each question with `answer`, and returns the questions that surfaced. */
+async function askAndAnswer(thread: Thread, answer: (question: QuestionRequest) => Record<string, string[]>): Promise<QuestionRequest[]> {
+  const questions: QuestionRequest[] = [];
+  for await (const event of thread.run("Ask me")) {
+    if (event.type !== "request") continue;
+    assert.equal(event.request.kind, "question");
+    const question = event.request as QuestionRequest;
+    questions.push(question);
+    await question.respond(answer(question));
+  }
+  return questions;
+}
+
+test("an agent's question surfaces with every option, and each option can be chosen", async () => {
+  for (const [label, optionId] of [["Red", "1"], ["Green", "2"], ["Blue", "3"]] as const) {
+    const answers: unknown[] = [];
+    const { engine } = engineWith({ "session/prompt": questionPrompt(answers) });
+    const thread = await engine.startThread({ cwd: CWD, access: "ask" });
+    const [question] = await askAndAnswer(thread, (asked) => ({ [asked.questions[0]!.id]: [label] }));
+    assert.equal(question?.id, "interaction_1");
+    assert.deepEqual(question?.questions, [{
+      id: "interaction_1",
+      header: "",
+      question: "Which colour?",
+      options: [{ label: "Red", description: "" }, { label: "Green", description: "" }, { label: "Blue", description: "" }],
+      multiSelect: false,
+      allowOther: false,
+      secret: false,
+    }]);
+    assert.deepEqual((question?.raw as { options: unknown }).options, QUESTION_OPTIONS);
+    assert.deepEqual(answers, [{ outcome: { outcome: "selected", optionId } }]);
+    await engine.close();
+  }
+});
+
+test("no access level answers a question on its own", async () => {
+  for (const access of ["full", "accept-edits", "ask", "read-only"] as const) {
+    const answers: unknown[] = [];
+    const { engine } = engineWith({ "session/prompt": questionPrompt(answers) });
+    const thread = await engine.startThread({ cwd: CWD, access });
+    const questions = await askAndAnswer(thread, (asked) => {
+      assert.deepEqual(answers, [], `${access} answered before the caller did`);
+      return { [asked.questions[0]!.id]: ["Blue"] };
+    });
+    assert.equal(questions.length, 1, access);
+    assert.deepEqual(answers, [{ outcome: { outcome: "selected", optionId: "3" } }], access);
+    await engine.close();
+  }
+});
+
+test("a question with only an id in its request still reads what was announced", async () => {
+  const answers: unknown[] = [];
+  const { engine } = engineWith({ "session/prompt": questionPrompt(answers, QUESTION_OPTIONS, { toolCallId: "interaction_1" }, QUESTION_CALL) });
+  const thread = await engine.startThread({ cwd: CWD, access: "full" });
+  const [question] = await askAndAnswer(thread, (asked) => ({ [asked.questions[0]!.id]: ["Green"] }));
+  assert.equal(question?.questions[0]?.question, "Which colour?");
+  assert.deepEqual(answers, [{ outcome: { outcome: "selected", optionId: "2" } }]);
+  await engine.close();
+});
+
+test("an empty answer declines a question", async () => {
+  const answers: unknown[] = [];
+  const { engine } = engineWith({ "session/prompt": questionPrompt(answers) });
+  const thread = await engine.startThread({ cwd: CWD, access: "ask" });
+  await askAndAnswer(thread, () => ({}));
+  assert.deepEqual(answers, [{ outcome: { outcome: "cancelled" } }]);
+  await engine.close();
+});
+
+test("an answer that is not one option is refused and the question stays open", async () => {
+  const answers: unknown[] = [];
+  const { engine } = engineWith({ "session/prompt": questionPrompt(answers) });
+  const thread = await engine.startThread({ cwd: CWD, access: "ask" });
+  for await (const event of thread.run("Ask me")) {
+    if (event.type !== "request") continue;
+    const question = event.request as QuestionRequest;
+    const id = question.questions[0]!.id;
+    for (const wrong of [{ [id]: ["Purple"] }, { [id]: ["Red", "Blue"] }, { [id]: [] }, { "another-question": ["Red"] }]) {
+      await assert.rejects(question.respond(wrong), AgentEngineError);
+    }
+    assert.deepEqual(answers, []);
+    await question.respond({ [id]: ["Green"] });
+  }
+  assert.deepEqual(answers, [{ outcome: { outcome: "selected", optionId: "2" } }]);
+  await engine.close();
+});
+
+test("two options with the same name can each be chosen", async () => {
+  const options = [
+    { optionId: "1", name: "Same", kind: "allow_once" },
+    { optionId: "2", name: "Same", kind: "allow_once" },
+  ];
+  const answers: unknown[] = [];
+  const { engine } = engineWith({ "session/prompt": questionPrompt(answers, options) });
+  const thread = await engine.startThread({ cwd: CWD, access: "ask" });
+  const [question] = await askAndAnswer(thread, (asked) => ({ [asked.questions[0]!.id]: [asked.questions[0]!.options[1]!.label] }));
+  assert.deepEqual(question?.questions[0]?.options.map((option) => option.label), ["Same", "Same (2)"]);
+  assert.deepEqual(answers, [{ outcome: { outcome: "selected", optionId: "2" } }]);
+  await engine.close();
+});
+
+test("interrupt() cancels a question nobody has answered", async () => {
+  const answers: unknown[] = [];
+  const { engine, agent } = engineWith({
+    "session/prompt": async (params, server) => {
+      answers.push(await server.ask("session/request_permission", { sessionId: params.sessionId, toolCall: QUESTION_CALL, options: QUESTION_OPTIONS }));
+      return { stopReason: "cancelled" };
+    },
+  });
+  const thread = await engine.startThread({ cwd: CWD, access: "full" });
+  const turn = thread.run("Ask me");
+  for await (const event of turn) {
+    if (event.type === "request") await turn.interrupt();
+  }
+  assert.equal((await turn.result).status, "interrupted");
+  assert.equal(agent().notifications("session/cancel").length, 1);
+  assert.deepEqual(answers, [{ outcome: { outcome: "cancelled" } }]);
+  await engine.close();
+});
+
+const ALLOW_A = { optionId: "a", name: "Allow A", kind: "allow_once" };
+const ALLOW_B = { optionId: "b", name: "Allow B", kind: "allow_once" };
+const ALWAYS = { optionId: "always", name: "Always", kind: "allow_always" };
+const REJECT = { optionId: "no", name: "No", kind: "reject_once" };
+const BARE_CALL = { toolCallId: "call-1", title: "Do it", rawInput: {} };
+
+/** What must stay an approval, with what `full` and `read-only` answer on their own (null: cancelled). */
+const APPROVALS: Array<{ name: string; options: unknown[]; toolCall?: Record<string, unknown>; announced?: Record<string, unknown>; full: string; readOnly: string | null }> = [
+  {
+    name: "Antigravity's real command approval",
+    options: [{ optionId: "allow_always", name: "Allow Always (risky)", kind: "allow_always" }, { optionId: "allow", name: "Allow", kind: "allow_once" }, { optionId: "deny", name: "Deny", kind: "reject_once" }],
+    toolCall: { toolCallId: "3480cb8f", kind: "execute", status: "pending", title: "echo hello", rawInput: { CommandLine: "echo hello" } },
+    full: "allow",
+    readOnly: "deny",
+  },
+  { name: "the usual allow and reject", options: [ALLOW_A, REJECT], full: "a", readOnly: "no" },
+  { name: "several ways to allow beside a reject", options: [ALLOW_A, ALLOW_B, REJECT], full: "a", readOnly: "no" },
+  { name: "allow once and always with no reject", options: [ALLOW_A, ALWAYS], full: "a", readOnly: null },
+  { name: "one option", options: [ALLOW_A], full: "a", readOnly: null },
+  { name: "a tool kind", options: [ALLOW_A, ALLOW_B], toolCall: { ...BARE_CALL, kind: "execute" }, full: "a", readOnly: null },
+  { name: "the explicit kind other", options: [ALLOW_A, ALLOW_B], toolCall: { ...BARE_CALL, kind: "other" }, full: "a", readOnly: null },
+  { name: "tool input", options: [ALLOW_A, ALLOW_B], toolCall: { ...BARE_CALL, rawInput: { path: "x" } }, full: "a", readOnly: null },
+  { name: "locations", options: [ALLOW_A, ALLOW_B], toolCall: { ...BARE_CALL, locations: [{ path: "x" }] }, full: "a", readOnly: null },
+  { name: "content", options: [ALLOW_A, ALLOW_B], toolCall: { ...BARE_CALL, content: [{ type: "diff", path: "x", newText: "y" }] }, full: "a", readOnly: null },
+  { name: "a kind announced earlier and not repeated", options: [ALLOW_A, ALLOW_B], toolCall: { toolCallId: "call-1", title: "Do it" }, announced: { ...BARE_CALL, kind: "edit" }, full: "a", readOnly: null },
+  { name: "input announced earlier and not repeated", options: [ALLOW_A, ALLOW_B], toolCall: { toolCallId: "call-1", title: "Do it", kind: null, rawInput: null }, announced: { ...BARE_CALL, rawInput: { command: "ls" } }, full: "a", readOnly: null },
+  { name: "no title", options: [ALLOW_A, ALLOW_B], toolCall: { toolCallId: "call-1", rawInput: {} }, full: "a", readOnly: null },
+];
+
+for (const { name, options, toolCall = BARE_CALL, announced = toolCall, full, readOnly } of APPROVALS) {
+  test(`a request with ${name} stays an approval at every access level`, async () => {
+    const run = async (access: "ask" | "full" | "read-only") => {
+      const answers: unknown[] = [];
+      const { engine } = engineWith({ "session/prompt": questionPrompt(answers, options, toolCall, announced) });
+      const thread = await engine.startThread({ cwd: CWD, access });
+      const surfaced: AgentRequest[] = [];
+      for await (const event of thread.run("Do it")) {
+        if (event.type !== "request") continue;
+        surfaced.push(event.request);
+        assert.equal(event.request.kind, "approval");
+        await (event.request as ApprovalRequest).respond({ decision: "allow" });
+      }
+      await engine.close();
+      return { surfaced, answers };
+    };
+    const selected = (optionId: string | null) => (optionId ? { outcome: { outcome: "selected", optionId } } : { outcome: { outcome: "cancelled" } });
+
+    const ask = await run("ask");
+    assert.deepEqual(ask.surfaced.map((request) => request.kind), ["approval"]);
+    assert.deepEqual(ask.answers, [selected(full)]);
+
+    const allowed = await run("full");
+    assert.deepEqual(allowed.surfaced, []);
+    assert.deepEqual(allowed.answers, [selected(full)]);
+
+    const refused = await run("read-only");
+    assert.deepEqual(refused.surfaced, []);
+    assert.deepEqual(refused.answers, [selected(readOnly)]);
+  });
+}
 
 test("run() with mode plan switches the session to its plan mode with session/set_mode", async () => {
   const { engine, agent } = engineWith();

@@ -166,7 +166,7 @@ Codex marks each agent message's `phase` on `text.delta` and `text.done`: `comme
 
 `file.changed` lists the files one tool call changed, from the main agent or a subagent (tagged with its `agentId`): Codex's `apply_patch` edits, and Claude's Edit, MultiEdit, Write and NotebookEdit. Each `diff` is unified hunks with no `---`/`+++` header, the same from both runtimes: a new file is all `+` lines, a deleted one all `-`, and a Codex move names the new path in `movedTo`. Files a shell command writes are not reported by either runtime.
 
-A `request` is an approval, a question (Claude's AskUserQuestion, Codex's user-input request) or an MCP elicitation. Call its `respond` once; an unanswered request is cancelled when the turn ends. A Codex file-change approval carries the proposed `changes`, with diffs, so the user can review them before allowing.
+A `request` is an approval, a question (Claude's AskUserQuestion, Codex's user-input request, an ACP agent's multiple-choice question) or an MCP elicitation. Call its `respond` once; an unanswered request is cancelled when the turn ends. A Codex file-change approval carries the proposed `changes`, with diffs, so the user can review them before allowing.
 
 A failed turn has an `error.kind`: `usage-limit` and `rate-limit` come with `resetsAt` when the runtime says, so an app can try again then.
 
@@ -339,6 +339,7 @@ if (status.updateOffered) {
 
 - ACP has no steering, so `steer` throws `SteerRejectedError`; there is no compaction, rewind or structured output.
 - Permission requests surface as `request` events. `access: "full"` allows each one once without asking, `read-only` refuses, `accept-edits` allows edits and asks about the rest.
+- Some agents, such as Antigravity, ask multiple-choice questions through the same protocol request. One with two or more options that are all `allow_once`, and no tool kind, input, name, locations or content, is a `question` at every access level, so answer it with an option's label; an empty answer cancels it. A question sent any other way, such as with a reject option, can't be told from an approval and stays one.
 - Resuming loads the session, which replays its history into `history()`. `models()` and `commands()` open a session in a temporary folder when no thread is open, and the agent may keep it in its own list.
 - File reads, writes and terminals stay with the agent: the engine does not offer the client file system or terminal.
 

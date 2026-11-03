@@ -113,6 +113,11 @@ export class AcpNormalizer {
     this.entries = prompt ? [{ kind: "message", role: "user", text: prompt }] : [];
   }
 
+  /** What the agent has announced of a tool call still in progress. */
+  announcedTool(id: string): Json | undefined {
+    return this.tools.get(id);
+  }
+
   /** Closes the current turn: any open message ends, and the turn joins the history. */
   endTurn(status: HistoryTurn["status"]): AgentEvent[] {
     const events = this.closeOpen();

@@ -6,7 +6,8 @@
  * What an agent can do varies, so `capabilities()` reads the agent's own
  * `initialize` answer. ACP has no steering, so `Turn.steer` always refuses.
  * Approvals arrive as `session/request_permission` and surface as `request`
- * events, answered automatically where the thread's access level decides.
+ * events, answered automatically where the thread's access level decides. Some
+ * agents ask multiple-choice questions the same way; those always reach the caller.
  */
 
 import { randomUUID } from "node:crypto";
@@ -506,6 +507,52 @@ function record(value: unknown): Json | undefined {
   return typeof value === "object" && value !== null && !Array.isArray(value) ? (value as Json) : undefined;
 }
 
+/**
+ * The question a permission request asks, or undefined if it is an approval.
+ * ACP has no question request, so agents such as Antigravity put the answers in
+ * the options of `session/request_permission`. The shape is all there is to go on:
+ * - two or more options, all `allow_once`, so a kind cannot tell them apart and
+ *   there is no way to refuse;
+ * - a title to ask, and nothing naming an operation: no tool kind, input, name,
+ *   locations or content, either here or in what the agent announced of this call
+ *   (a request may send only the fields that changed).
+ * Anything else stays an approval, as it always was.
+ */
+function questionAsked(call: Json, announced: Json | undefined, options: readonly Json[]): string | undefined {
+  if (options.length < 2 || options.some((option) => option.kind !== "allow_once")) return undefined;
+  const bare = (fields: Json) => fields.kind == null && [fields.rawInput, fields.name, fields.locations, fields.content].every(
+    (value) => value == null || (typeof value === "object" && Object.keys(value).length === 0),
+  );
+  if (!bare(call) || (announced && !bare(announced))) return undefined;
+  const title = call.title ?? announced?.title;
+  return typeof title === "string" && title.trim() ? title : undefined;
+}
+
+/** A permission request that asks a question, as a question: one answer, any of its options. */
+function optionQuestion(id: string, question: string, options: readonly Json[], raw: unknown, settle: (answer: unknown) => void): AgentRequest {
+  // Answers come back by label, so two options with one name must not share a label.
+  const optionIds = new Map<string, string>();
+  for (const option of options) {
+    const name = String(option.name ?? option.optionId);
+    optionIds.set(optionIds.has(name) ? `${name} (${option.optionId})` : name, String(option.optionId));
+  }
+  const labels = [...optionIds.keys()];
+  return {
+    kind: "question",
+    id,
+    questions: [{ id, header: "", question, options: labels.map((label) => ({ label, description: "" })), multiSelect: false, allowOther: false, secret: false }],
+    raw,
+    respond: async (answers) => {
+      if (!Object.keys(answers).length) return settle({ outcome: { outcome: "cancelled" } });
+      const chosen = answers[id];
+      const optionId = chosen?.length === 1 ? optionIds.get(chosen[0]!) : undefined;
+      // Never guess: the request stays open for a valid answer.
+      if (optionId === undefined) throw new AgentEngineError(`Answer "${question}" with one of: ${labels.join(", ")}.`);
+      settle({ outcome: { outcome: "selected", optionId } });
+    },
+  };
+}
+
 /** How `open` reaches the session. */
 interface OpenSource {
   forkOf?: string;
@@ -793,11 +840,13 @@ class AcpThread implements Thread {
   /**
    * @internal A permission request. The access level answers it where it can:
    * `full` allows once, `read-only` refuses once, `accept-edits` allows file edits;
-   * anything else surfaces as a `request` event.
+   * anything else surfaces as a `request` event. A question always surfaces: it
+   * asks for the user's choice, not for permission, so no access level can answer it.
    */
   permission(p: Json): Promise<unknown> {
     const options: Json[] = Array.isArray(p.options) ? p.options : [];
     const call = record(p.toolCall) ?? {};
+    const question = questionAsked(call, this.normalizer.announcedTool(String(call.toolCallId)), options);
     const pick = (...kinds: string[]) => {
       for (const kind of kinds) {
         const option = options.find((entry) => entry.kind === kind);
@@ -807,8 +856,10 @@ class AcpThread implements Thread {
     };
     const edit = call.kind === "edit" || call.kind === "delete" || call.kind === "move";
     // Automatic answers allow once, so they never widen what the agent may do later.
-    if (this.access === "full" || (this.access === "accept-edits" && edit)) return Promise.resolve(pick("allow_once", "allow_always"));
-    if (this.access === "read-only") return Promise.resolve(pick("reject_once", "reject_always"));
+    if (question === undefined) {
+      if (this.access === "full" || (this.access === "accept-edits" && edit)) return Promise.resolve(pick("allow_once", "allow_always"));
+      if (this.access === "read-only") return Promise.resolve(pick("reject_once", "reject_always"));
+    }
     return new Promise((resolve) => {
       let settled = false;
       const settle = (answer: unknown) => {
@@ -820,7 +871,7 @@ class AcpThread implements Thread {
       const cancel = () => settle({ outcome: { outcome: "cancelled" } });
       this.pendingRequests.add(cancel);
       const command = call.kind === "execute" ? (record(call.rawInput)?.command ?? call.title) : undefined;
-      const request: AgentRequest = {
+      const request: AgentRequest = question !== undefined ? optionQuestion(String(call.toolCallId ?? randomUUID()), question, options, p, settle) : {
         kind: "approval",
         id: String(call.toolCallId ?? randomUUID()),
         action: call.kind === "execute" ? "command" : edit ? "file-change" : "tool",
