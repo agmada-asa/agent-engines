@@ -84,6 +84,33 @@ test("a turn streams events and ends on result", async () => {
   await engine.close();
 });
 
+test("a save warning after the final result reaches subscribers without failing the turn", async () => {
+  const { sdk, queries } = fakeClaudeSdk({ onUser: (_message, query) => replyMessages("Done").forEach((m) => query.emit(m)) });
+  const engine = new ClaudeEngine({ sdk });
+  try {
+    const thread = await engine.startThread({ cwd: "/tmp" });
+    const seen: AgentEvent[] = [];
+    thread.subscribe((event) => seen.push(event));
+    const turn = thread.run("Finish the task");
+    const result = await turn.result;
+    assert.equal(result.status, "completed");
+
+    queries[0].emit({ type: "system", subtype: "session_writes_lost", error_code: "ENOSPC", lost: ["transcript"], transcript_session_ids: [thread.id] });
+    queries[0].end();
+    await until(() => seen.at(-1)?.type === "notice");
+    assert.deepEqual(seen.map((event) => event.type), ["turn.started", "text.delta", "text.done", "turn.completed", "notice"]);
+    const warning = seen.at(-1)!;
+    assert.equal(warning.turnId, "");
+    assert.equal(warning.threadId, thread.id);
+    assert.equal(warning.type, "notice");
+    if (warning.type === "notice") assert.equal(warning.kind, "warning");
+    assert.equal(thread.activeTurn, undefined);
+    assert.equal(await turn.result, result);
+  } finally {
+    await engine.close();
+  }
+});
+
 test("per-turn model, effort and fast mode go through the SDK controls", async () => {
   const { sdk, queries } = fakeClaudeSdk({ onUser: (_message, query) => replyMessages("ok").forEach((m) => query.emit(m)) });
   const engine = new ClaudeEngine({ sdk });

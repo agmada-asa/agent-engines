@@ -18,6 +18,8 @@ on:
   pull_request:
     paths:
       - "src/**"
+      - "package.json"
+      - "package-lock.json"
       - "scripts/check-runtimes.ts"
       - ".github/workflows/runtimes.yml"
 
