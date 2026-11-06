@@ -3,6 +3,7 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
 import { CodexNormalizer, classifyCodexError, codexRateLimits, codexRequest } from "../src/codex/normalize.ts";
+import type { AgentRequest } from "../src/types.ts";
 
 const T = "thread-1";
 
@@ -55,6 +56,19 @@ test("tool calls: commands, MCP tools and web search", () => {
   });
   const search = n.normalize("item/started", { threadId: T, turnId: "turn-1", item: { type: "webSearch", id: "w1", query: "weather" } });
   assert.equal((search[0] as any).tool.kind, "web-search");
+});
+
+test("a host tool's images and audio reach tool.completed as media", () => {
+  const n = normalizer();
+  const [event] = n.normalize("item/completed", {
+    threadId: T, turnId: "turn-1",
+    item: {
+      type: "dynamicToolCall", id: "d1", tool: "chart", namespace: null, arguments: {}, status: "completed", success: true,
+      contentItems: [{ type: "inputText", text: "Chart" }, { type: "inputImage", imageUrl: "data:image/png;base64,AAAA" }, { type: "inputAudio", audioUrl: "https://x.test/a.wav" }],
+    },
+  });
+  assert.equal(event.type === "tool.completed" && event.output, "Chart");
+  assert.deepEqual(event.type === "tool.completed" && event.media, [{ type: "image", url: "data:image/png;base64,AAAA" }, { type: "audio", url: "https://x.test/a.wav" }]);
 });
 
 test("file changes", () => {
@@ -204,6 +218,53 @@ test("approval requests map decisions to Codex's", async () => {
   const legacy = codexRequest(8, "execCommandApproval", { command: ["ls"] })!;
   await (legacy.request as any).respond({ decision: "deny" });
   assert.deepEqual(await legacy.response, { decision: "denied" });
+});
+
+test("a command approval offers Codex's lasting rules, and allowing with one saves it", async () => {
+  const params = {
+    threadId: T, turnId: "turn-1", itemId: "c", command: "curl https://api.test", cwd: "/repo",
+    networkApprovalContext: { host: "api.test", protocol: "https" },
+    availableDecisions: [
+      "accept",
+      { acceptWithExecpolicyAmendment: { execpolicy_amendment: ["curl"] } },
+      { applyNetworkPolicyAmendment: { network_policy_amendment: { host: "api.test", action: "allow" } } },
+      "decline",
+    ],
+  };
+  const prefix = codexRequest(20, "item/commandExecution/requestApproval", params)!;
+  const request = prefix.request as Extract<AgentRequest, { kind: "approval" }>;
+  assert.equal(request.title, "Reach api.test");
+  assert.deepEqual(request.network, { host: "api.test", protocol: "https" });
+  // Session-wide approval is not on offer here, so a UI can leave it out.
+  assert.deepEqual(request.decisions, ["allow", "deny"]);
+  assert.deepEqual(request.rules, [{ kind: "command-prefix", prefix: ["curl"] }, { kind: "network", host: "api.test", action: "allow" }]);
+  await assert.rejects(request.respond({ decision: "allow", rule: { kind: "command-prefix", prefix: ["rm"] } }), /did not offer that rule/);
+  await request.respond({ decision: "allow", rule: { kind: "command-prefix", prefix: ["curl"] } });
+  assert.deepEqual(await prefix.response, { decision: { acceptWithExecpolicyAmendment: { execpolicy_amendment: ["curl"] } } });
+
+  const host = codexRequest(21, "item/commandExecution/requestApproval", params)!;
+  await (host.request as any).respond({ decision: "allow", rule: { kind: "network", host: "api.test", action: "allow" } });
+  assert.deepEqual(await host.response, { decision: { applyNetworkPolicyAmendment: { network_policy_amendment: { host: "api.test", action: "allow" } } } });
+
+  // A server that sends no decision list still has its proposals offered.
+  const older = codexRequest(22, "item/commandExecution/requestApproval", {
+    threadId: T, turnId: "turn-1", itemId: "c", command: "npm test",
+    proposedExecpolicyAmendment: ["npm", "test"], proposedNetworkPolicyAmendments: [{ host: "registry.test", action: "deny" }],
+  })!;
+  const olderRequest = older.request as Extract<AgentRequest, { kind: "approval" }>;
+  assert.equal(olderRequest.decisions, undefined);
+  assert.deepEqual(olderRequest.rules, [{ kind: "command-prefix", prefix: ["npm", "test"] }, { kind: "network", host: "registry.test", action: "deny" }]);
+});
+
+test("a permissions approval can grant part of what was asked, with strict review", async () => {
+  const params = { threadId: T, turnId: "turn-1", itemId: "p", cwd: "/repo", reason: null, permissions: { network: { enabled: true }, fileSystem: { read: null, write: ["/repo/out"] } } };
+  const partial = codexRequest(23, "item/permissions/requestApproval", params)!;
+  await (partial.request as any).respond({ decision: "allow-session", grant: { network: true }, strictReview: true });
+  assert.deepEqual(await partial.response, { permissions: { network: { enabled: true } }, scope: "session", strictAutoReview: true });
+
+  const all = codexRequest(24, "item/permissions/requestApproval", params)!;
+  await (all.request as any).respond({ decision: "allow" });
+  assert.deepEqual(await all.response, { permissions: params.permissions, scope: "turn" });
 });
 
 test("question and elicitation requests", async () => {

@@ -63,6 +63,7 @@ import type {
   ThreadHistory,
   ThreadMode,
   ThreadOptions,
+  ThreadSetting,
   ThreadSummary,
   TranscriptEntry,
   Turn,
@@ -156,9 +157,34 @@ export const CODEX_CAPABILITIES: Capabilities = {
   plugins: { list: true, install: true, reload: false },
   config: true,
   realtime: true,
+  settings: false,
   promptSuggestions: false,
   liveOutput: { commandOutput: true, diff: true, planProposal: true },
 };
+
+/**
+ * What a host tool returns to the model. `text` comes first, then `content`
+ * in order. Images and audio are URLs: `https:` or `data:` with base64.
+ */
+export interface CodexToolResult {
+  text?: string;
+  content?: CodexToolContent[];
+  success: boolean;
+}
+
+/** One part of a host tool's result. */
+export type CodexToolContent = { type: "text"; text: string } | { type: "image"; url: string } | { type: "audio"; url: string };
+
+/** A host tool result as Codex's content items. */
+function toolContentItems(result: CodexToolResult): unknown[] {
+  const items: unknown[] = result.text !== undefined ? [{ type: "inputText", text: result.text }] : [];
+  for (const part of result.content ?? []) {
+    if (part.type === "text") items.push({ type: "inputText", text: part.text });
+    else if (part.type === "image") items.push({ type: "inputImage", imageUrl: part.url });
+    else if (part.type === "audio") items.push({ type: "inputAudio", audioUrl: part.url });
+  }
+  return items;
+}
 
 /** A host-answered tool call (a thread's `codex.dynamicTools`). */
 export interface CodexToolCall {
@@ -194,7 +220,7 @@ export interface CodexEngineOptions {
   minimumVersion?: string;
   requestTimeoutMs?: number;
   /** Answers `codex.dynamicTools` calls; without it they fail. */
-  onToolCall?: (call: CodexToolCall) => Promise<{ text: string; success: boolean }>;
+  onToolCall?: (call: CodexToolCall) => Promise<CodexToolResult>;
   /** Client name the app-server records. */
   clientName?: string;
   /** Injectable process factory for tests. */
@@ -390,6 +416,7 @@ async function agentRoles(agents: NonNullable<ThreadOptions["agents"]>): Promise
     // JSON string escapes are valid TOML basic strings.
     const toml = [
       ...(agent.model ? [`model = ${JSON.stringify(agent.model)}`] : []),
+      ...(agent.effort ? [`model_reasoning_effort = ${JSON.stringify(agent.effort)}`] : []),
       `developer_instructions = ${JSON.stringify(agent.prompt)}`,
       "",
     ].join("\n");
@@ -786,7 +813,7 @@ export class CodexEngine implements Engine {
           namespace: params.namespace ?? null,
           arguments: params.arguments,
         });
-        return { contentItems: [{ type: "inputText", text: result.text }], success: result.success };
+        return { contentItems: toolContentItems(result), success: result.success };
       } catch {
         return { contentItems: [{ type: "inputText", text: "The tool call could not be completed." }], success: false };
       }
@@ -1276,6 +1303,14 @@ class CodexThread implements Thread {
 
   async export(): Promise<PortableTranscript> {
     return { provider: "codex", threadId: this.id, turns: await this.history() };
+  }
+
+  async settings(): Promise<ThreadSetting[]> {
+    throw new UnsupportedFeatureError("list session settings", "Codex", "set model, effort and mode with run options, or codex.config");
+  }
+
+  async setSetting(): Promise<ThreadSetting[]> {
+    throw new UnsupportedFeatureError("change session settings", "Codex", "set model, effort and mode with run options, or codex.config");
   }
 
   async realtime(options: RealtimeOptions = {}): Promise<RealtimeSession> {

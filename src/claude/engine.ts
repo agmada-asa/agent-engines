@@ -19,6 +19,7 @@ import { isAbsolute, join } from "node:path";
 import { readFile, readdir, rm, rmdir } from "node:fs/promises";
 import * as sdkModule from "@anthropic-ai/claude-agent-sdk";
 import type {
+  AgentDefinition as SdkAgentDefinition,
   CanUseTool,
   McpServerConfig,
   OnElicitation,
@@ -82,6 +83,7 @@ import type {
   ThreadHistory,
   ThreadMode,
   ThreadOptions,
+  ThreadSetting,
   ThreadSummary,
   TranscriptEntry,
   Turn,
@@ -147,6 +149,7 @@ export const CLAUDE_CAPABILITIES: Capabilities = {
   plugins: { list: true, install: false, reload: true },
   config: true,
   realtime: false,
+  settings: false,
   promptSuggestions: true,
   liveOutput: { commandOutput: false, diff: false, planProposal: true },
 };
@@ -762,6 +765,13 @@ class ClaudeThread implements Thread {
   private current?: TurnHandle;
   private last?: LastTurn;
   private interruptRequested = false;
+  /** Whether Claude has produced output for the current turn, so an interrupt reaches it. */
+  private turnRunning = false;
+  /**
+   * An interrupt sent before Claude started the turn: Claude ignores one that
+   * arrives before it reads the prompt, so it is sent again once the turn runs.
+   */
+  private pendingStop?: () => Promise<void>;
   private lastText = "";
   private expectedModel?: string;
   private prompted: boolean;
@@ -1031,6 +1041,14 @@ class ClaudeThread implements Thread {
     throw new UnsupportedFeatureError("open a realtime voice session", "Claude");
   }
 
+  async settings(): Promise<ThreadSetting[]> {
+    throw new UnsupportedFeatureError("list session settings", "Claude", "set model, effort and mode with run options");
+  }
+
+  async setSetting(): Promise<ThreadSetting[]> {
+    throw new UnsupportedFeatureError("change session settings", "Claude", "set model, effort and mode with run options");
+  }
+
   async close(): Promise<void> {
     if (this.closed) return;
     this.closed = true;
@@ -1043,24 +1061,66 @@ class ClaudeThread implements Thread {
   }
 
   private newTurn(): TurnHandle {
+    // Each steer carries an ID so an interrupt's receipt can say whether it is still waiting.
+    const steers = new Set<string>();
     const turn: TurnHandle = new TurnHandle(this.id, {
       steer: async (input) => {
         if (turn.done || this.current !== turn) throw new SteerRejectedError("The turn has ended; start a new one.");
-        this.send(userMessage(await claudeContent(input), { priority: "next" }));
+        const uuid = randomUUID();
+        steers.add(uuid);
+        this.send(userMessage(await claudeContent(input), { priority: "next", uuid }));
       },
       interrupt: async () => {
         if (turn.done || this.current !== turn) return;
         this.interruptRequested = true;
-        await this.query?.interrupt();
+        const stop = async () => {
+          const query = this.query;
+          const receipt = await query?.interrupt();
+          if (query && receipt) await this.withdraw(turn, query, receipt.still_queued, steers);
+        };
+        if (!this.turnRunning) this.pendingStop = stop;
+        await stop();
       },
     });
     turn.setId(randomUUID());
     this.current = turn;
     this.interruptRequested = false;
+    this.turnRunning = false;
+    this.pendingStop = undefined;
     this.lastText = "";
     this.normalizer.startTurn();
     this.dispatch({ threadId: this.id, turnId: turn.turnId!, type: "turn.started" });
     return turn;
+  }
+
+  /**
+   * Claude keeps queued input across an interrupt and runs it next. This takes
+   * back what the interrupted turn still has waiting: its steers, and its own
+   * prompt if Claude had not started it. Whatever cannot be taken back runs as
+   * a new turn, and a warning says so.
+   */
+  private async withdraw(turn: TurnHandle, query: Query, stillQueued: string[], steers: Set<string>): Promise<void> {
+    const ours = stillQueued.filter((uuid) => uuid === turn.turnId || steers.has(uuid));
+    if (!ours.length) return;
+    // The SDK has the method but does not type it yet.
+    const cancel = (query as unknown as { cancelAsyncMessage?: (uuid: string) => Promise<boolean> }).cancelAsyncMessage;
+    let kept = 0;
+    for (const uuid of ours) {
+      // Each steer is settled once, so a second interrupt does not warn about it again.
+      steers.delete(uuid);
+      const cancelled = typeof cancel === "function" ? await cancel.call(query, uuid).catch(() => false) : false;
+      // A withdrawn prompt never produces a result, so the turn ends here. A prompt
+      // Claude would not give back still belongs to this turn and ends it.
+      if (uuid === turn.turnId) {
+        if (cancelled) this.finish(turn, { status: "interrupted" });
+      } else if (!cancelled) kept++;
+    }
+    if (kept) {
+      this.dispatch({
+        threadId: this.id, turnId: turn.turnId!, type: "notice", kind: "warning",
+        message: `Claude kept ${kept === 1 ? "a steer" : `${kept} steers`} sent before the interrupt and runs ${kept === 1 ? "it" : "them"} as a new turn.`,
+      });
+    }
   }
 
   /** The live query, starting a new process on the same session if the last one ended. */
@@ -1124,6 +1184,12 @@ class ClaudeThread implements Thread {
     const mainOutput = !m.parent_tool_use_id && !m.agent_id && (m.type === "assistant" || (m.type === "stream_event" && m.event?.type === "message_start"));
     if (mainOutput && (!this.current || this.current.done)) this.newTurn();
     const turn = this.current && !this.current.done ? this.current : undefined;
+    if (turn && !m.parent_tool_use_id && !m.agent_id && (m.type === "assistant" || m.type === "stream_event")) {
+      this.turnRunning = true;
+      const stop = this.pendingStop;
+      this.pendingStop = undefined;
+      if (stop) void stop().catch(() => undefined);
+    }
     for (const event of this.normalizer.normalize(message, turn?.turnId ?? "")) {
       if (event.type === "text.done" && !event.agentId) this.lastText = event.text;
       this.dispatch(event);
@@ -1135,7 +1201,8 @@ class ClaudeThread implements Thread {
     }
     if (m.type === "result" && turn) {
       // A steer Claude could not fold into this turn runs as the next one; the turn covers both.
-      if (typeof m.queued_turn_count === "number" && m.queued_turn_count > 0) return;
+      // After an interrupt the turn ends here, and anything still queued runs as a new turn.
+      if (!this.interruptRequested && typeof m.queued_turn_count === "number" && m.queued_turn_count > 0) return;
       const usage = claudeUsage(m.modelUsage);
       if (this.interruptRequested) this.finish(turn, { status: "interrupted", usage });
       else if (m.subtype === "success" && !m.is_error) {
@@ -1155,6 +1222,7 @@ class ClaudeThread implements Thread {
 
   private finish(turn: TurnHandle, outcome: { status: TurnResult["status"]; text?: string; output?: unknown; usage?: ReturnType<typeof claudeUsage>; error?: TurnResult["error"] }): void {
     if (turn.done) return;
+    if (turn === this.current) this.pendingStop = undefined;
     const base = { threadId: this.id, turnId: turn.turnId! };
     const usage = outcome.usage ? { usage: outcome.usage } : {};
     const output = outcome.output !== undefined ? { output: outcome.output } : {};
@@ -1244,7 +1312,7 @@ class ClaudeThread implements Thread {
       ...(limits.maxTurns !== undefined ? { maxTurns: limits.maxTurns } : {}),
       ...(limits.maxBudgetUsd !== undefined ? { maxBudgetUsd: limits.maxBudgetUsd } : {}),
       ...(limits.tokenBudget !== undefined ? { taskBudget: { total: limits.tokenBudget } } : {}),
-      ...(options.agents ? { agents: Object.fromEntries(Object.entries(options.agents).map(([name, agent]) => [name, { description: agent.description, prompt: agent.prompt, ...(agent.model ? { model: agent.model } : {}), ...(agent.tools ? { tools: agent.tools } : {}) }])) } : {}),
+      ...(options.agents ? { agents: claudeAgents(options.agents) } : {}),
       ...(options.additionalDirectories?.length ? { additionalDirectories: options.additionalDirectories } : {}),
       ...(options.fileCheckpoints ? { enableFileCheckpointing: true } : {}),
       ...(options.fallbackModels?.length ? { fallbackModel: options.fallbackModels.join(",") } : {}),
@@ -1357,6 +1425,41 @@ class ClaudeThread implements Thread {
 }
 
 /** Thread MCP servers in the SDK's shape. */
+/** Custom subagents in the SDK's shape: neutral fields, then Claude's own, then `extra`. */
+function claudeAgents(agents: NonNullable<ThreadOptions["agents"]>): Record<string, SdkAgentDefinition> {
+  return Object.fromEntries(Object.entries(agents).map(([name, agent]) => {
+    const own = agent.claude ?? {};
+    const mcpServers = own.mcpServers?.map((entry) => {
+      if (typeof entry === "string") return entry;
+      for (const [server, spec] of Object.entries(entry)) {
+        if (spec.type === "sdk") throw new AgentEngineError(`Subagent ${name} cannot have the in-process MCP server ${server}; give it to the thread and name it here.`);
+      }
+      return claudeMcpServers(entry);
+    });
+    const definition = {
+      description: agent.description,
+      prompt: agent.prompt,
+      ...(agent.model ? { model: agent.model } : {}),
+      ...(agent.effort ? { effort: agent.effort } : {}),
+      ...(agent.tools ? { tools: agent.tools } : {}),
+      ...(agent.disallowedTools ? { disallowedTools: agent.disallowedTools } : {}),
+      ...(mcpServers ? { mcpServers } : {}),
+      ...(own.skills ? { skills: own.skills } : {}),
+      ...(own.maxTurns !== undefined ? { maxTurns: own.maxTurns } : {}),
+      ...(own.background !== undefined ? { background: own.background } : {}),
+      ...(own.omitClaudeMd !== undefined ? { omitClaudeMd: own.omitClaudeMd } : {}),
+      ...(own.memory ? { memory: own.memory } : {}),
+      ...(own.permissionMode ? { permissionMode: own.permissionMode } : {}),
+      ...(own.autoCompactWindow !== undefined ? { autoCompactWindow: own.autoCompactWindow } : {}),
+      ...(own.initialPrompt ? { initialPrompt: own.initialPrompt } : {}),
+      ...(own.observer ? { observer: own.observer } : {}),
+      ...(own.observerMessage ? { observerMessage: own.observerMessage } : {}),
+      ...(own.extra ?? {}),
+    };
+    return [name, definition as SdkAgentDefinition];
+  }));
+}
+
 function claudeMcpServers(servers: NonNullable<ThreadOptions["mcpServers"]>): Record<string, McpServerConfig> {
   const config: Record<string, McpServerConfig> = {};
   for (const [name, server] of Object.entries(servers)) {

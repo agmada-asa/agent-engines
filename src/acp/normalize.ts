@@ -8,7 +8,7 @@
  */
 
 import { unifiedDiff } from "../diff.ts";
-import type { AgentEvent, CommandInfo, FileChange, HistoryTurn, NoticeKind, PlanStep, ToolCall, TranscriptEntry } from "../types.ts";
+import type { AgentEvent, CommandInfo, FileChange, HistoryTurn, NoticeKind, PlanStep, ThreadSetting, ToolCall, TranscriptEntry } from "../types.ts";
 
 type Json = Record<string, any>;
 
@@ -80,6 +80,36 @@ function planSteps(entries: unknown): PlanStep[] {
 /** A notice's severity as a notice kind. */
 function noticeKind(severity: unknown): NoticeKind {
   return severity === "warning" || severity === "error" ? "warning" : "info";
+}
+
+/** ACP config options as neutral settings. Options of a type this client does not know are left out. */
+export function acpSettings(options: readonly Json[]): ThreadSetting[] {
+  return options.flatMap((option): ThreadSetting[] => {
+    const base = {
+      id: String(option.id),
+      name: String(option.name ?? option.id),
+      ...(typeof option.description === "string" && option.description ? { description: option.description } : {}),
+      ...(typeof option.category === "string" ? { category: option.category } : {}),
+    };
+    if (option.type === "boolean") return [{ ...base, type: "boolean", value: option.currentValue === true }];
+    // A missing type is a select, as before ACP added toggles.
+    if (option.type !== undefined && option.type !== "select") return [];
+    const entries: Json[] = Array.isArray(option.options) ? option.options : [];
+    const values: Json[] = entries.flatMap((entry) => (Array.isArray(entry.options)
+      ? entry.options.map((inner: Json) => ({ ...inner, group: String(entry.name ?? entry.group) }))
+      : [entry]));
+    return [{
+      ...base,
+      type: "select",
+      value: String(option.currentValue ?? ""),
+      options: values.map((entry) => ({
+        value: String(entry.value),
+        name: String(entry.name ?? entry.value),
+        ...(entry.description ? { description: String(entry.description) } : {}),
+        ...(entry.group ? { group: String(entry.group) } : {}),
+      })),
+    }];
+  });
 }
 
 /** One session's updates as events, and the turns seen so far. */
@@ -233,7 +263,7 @@ export class AcpNormalizer {
         return [];
       case "config_option_update":
         this.configOptions = Array.isArray(update.configOptions) ? update.configOptions : [];
-        return [];
+        return replaying ? [] : [{ ...this.base(), type: "settings.updated", settings: acpSettings(this.configOptions) }];
       case "session_info_update":
         if (typeof update.title !== "string" || !update.title || update.title === this.title) return [];
         this.title = update.title;

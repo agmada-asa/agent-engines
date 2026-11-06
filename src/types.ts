@@ -184,6 +184,8 @@ export interface Capabilities {
   config: boolean;
   /** `Thread.realtime`: a live voice or text session. */
   realtime: boolean;
+  /** `Thread.settings` and `setSetting`: settings the agent lists for a session. */
+  settings: boolean;
   /** `prompt.suggestion` events when `ThreadOptions.promptSuggestions` is on. */
   promptSuggestions: boolean;
   /** Which live progress events the runtime sends. */
@@ -585,8 +587,42 @@ export interface AgentDefinition {
   /** Its instructions. */
   prompt: string;
   model?: string;
+  /** Reasoning effort for this subagent: Claude's `effort`, Codex's `model_reasoning_effort`. */
+  effort?: string;
   /** Tools it may use (Claude). Codex ignores this. */
   tools?: string[];
+  /** Tools it may not use, MCP servers included as `mcp__server` (Claude). Codex ignores this. */
+  disallowedTools?: string[];
+  /** Claude-only settings for this subagent. Codex ignores them. */
+  claude?: ClaudeAgentOptions;
+}
+
+/** Claude-only settings for one subagent (`AgentDefinition.claude`). */
+export interface ClaudeAgentOptions {
+  /** MCP servers it gets: names of the thread's servers, or servers of its own by name. */
+  mcpServers?: Array<string | Record<string, McpServer>>;
+  /** Skills loaded into its context from the start. */
+  skills?: string[];
+  /** Its most model calls before it stops. */
+  maxTurns?: number;
+  /** Runs in the background: the main agent carries on and hears back when it ends. */
+  background?: boolean;
+  /** Leaves out the user, project and local CLAUDE.md files. */
+  omitClaudeMd?: boolean;
+  /** Where its own memory files load from. */
+  memory?: "user" | "project" | "local";
+  /** Its permission mode, as in `ClaudeThreadOptions.permissionMode`. */
+  permissionMode?: ClaudeThreadOptions["permissionMode"];
+  /** Token count at which it compacts its own context; it can only lower what it would inherit. */
+  autoCompactWindow?: number;
+  /** First message when this agent runs as the main agent. */
+  initialPrompt?: string;
+  /** Another agent that watches this one's activity and reports on it. */
+  observer?: string;
+  /** Added to every activity digest the observer gets. */
+  observerMessage?: string;
+  /** Any other SDK agent field, merged last. */
+  extra?: Record<string, unknown>;
 }
 
 /** Settings for a thread, used on start and again on resume. */
@@ -818,6 +854,21 @@ export interface PortableTranscript {
   turns: HistoryTurn[];
 }
 
+/**
+ * One session setting an agent offers (`Thread.settings`): a choice of values,
+ * or an on/off toggle. `category` is the agent's hint (`model`, `mode`,
+ * `thought_level`, `model_config`, or its own) and may be missing.
+ */
+export type ThreadSetting = {
+  id: string;
+  name: string;
+  description?: string;
+  category?: string;
+} & (
+  | { type: "select"; value: string; options: Array<{ value: string; name: string; description?: string; group?: string }> }
+  | { type: "boolean"; value: boolean }
+);
+
 /** Settings for `Thread.realtime`. */
 export interface RealtimeOptions {
   /** `audio` to hear replies (`realtime.audio` events); `text` for transcripts only. Defaults to `text`. */
@@ -921,6 +972,14 @@ export interface Thread {
   export(): Promise<PortableTranscript>;
   /** Opens a live voice or text session on the thread. */
   realtime(options?: RealtimeOptions): Promise<RealtimeSession>;
+  /**
+   * The session settings the agent lets a client change, as it lists them:
+   * model, effort and mode, and its own (ACP `configOptions`). A change the
+   * agent makes itself arrives as a `settings.updated` event.
+   */
+  settings(): Promise<ThreadSetting[]>;
+  /** Changes one of `settings()` by `id`, and returns them all afterwards. */
+  setSetting(id: string, value: string | boolean): Promise<ThreadSetting[]>;
   /** Stops the thread's process (Claude) or unloads it (Codex). The thread can be resumed later. */
   close(): Promise<void>;
 }
@@ -932,7 +991,12 @@ export interface Turn extends AsyncIterable<AgentEvent> {
   readonly id: Promise<string>;
   /** Adds a message to this running turn. Throws `SteerRejectedError` when it has ended. */
   steer(input: TurnInput): Promise<void>;
-  /** Asks the runtime to stop the turn; `result` then settles with status `interrupted`. */
+  /**
+   * Asks the runtime to stop the turn; `result` then settles with status
+   * `interrupted`. On Claude it also takes back steers still waiting to run;
+   * one Claude no longer gives back runs as a new turn, announced by a
+   * `warning` notice on the interrupted turn.
+   */
   interrupt(): Promise<void>;
   /** Settles when the turn ends, however it ends. Never rejects. */
   readonly result: Promise<TurnResult>;
@@ -1002,6 +1066,12 @@ export interface ToolCall {
   /** MCP server, for `mcp` calls. */
   server?: string;
   input: unknown;
+}
+
+/** An image or audio clip a tool returned, as an `https:` or `data:` URL. Codex host tools only for now. */
+export interface ToolMedia {
+  type: "image" | "audio";
+  url: string;
 }
 
 /** One file a turn changed. */
@@ -1078,7 +1148,7 @@ export type AgentEvent = EventBase &
     | { type: "reasoning.delta"; itemId: string; delta: string }
     | { type: "reasoning.done"; itemId: string; text: string }
     | { type: "tool.started"; itemId: string; tool: ToolCall }
-    | { type: "tool.completed"; itemId: string; tool: ToolCall; output?: string; isError: boolean }
+    | { type: "tool.completed"; itemId: string; tool: ToolCall; output?: string; media?: ToolMedia[]; isError: boolean }
     /** Live output of a running command, in order. `tool.completed` still carries the whole output. */
     | { type: "tool.output.delta"; itemId: string; delta: string }
     /** A running tool's progress: a message from the tool (Codex MCP) or time elapsed (Claude). */
@@ -1136,6 +1206,7 @@ export type AgentEvent = EventBase &
     /** An MCP server's state changed (started, ready, failed, needs sign-in). */
     | { type: "mcp.status"; server: string; status: string; error?: string; needsLogin?: boolean }
     | { type: "thread.renamed"; title: string }
+    | { type: "settings.updated"; settings: ThreadSetting[] }
     /** A suggested next prompt, after a turn (`promptSuggestions`). */
     | { type: "prompt.suggestion"; suggestion: string }
     | { type: "realtime.started"; sessionId?: string }
@@ -1183,9 +1254,53 @@ export interface ApprovalRequest {
    * announced them before asking (Codex sends them on the item it is approving).
    */
   changes?: FileChange[];
+  /** For `command`: the network host the command wants to reach, when that is what needs approval (Codex). */
+  network?: { host: string; protocol: string };
+  /**
+   * The plain decisions this request offers, in the runtime's order, when it
+   * says (Codex). Without it, assume all four.
+   */
+  decisions?: ApprovalDecision[];
+  /**
+   * Lasting rules the runtime offers to save with an approval (Codex
+   * commands). Answer `{ decision: "allow", rule }` with one of them to
+   * approve this command and save the rule.
+   */
+  rules?: ApprovalRule[];
   /** The runtime's own request, for anything not normalised. */
   raw: unknown;
-  respond(decision: { decision: "allow" | "allow-session" | "deny" | "cancel"; message?: string }): Promise<void>;
+  respond(decision: ApprovalResponse): Promise<void>;
+}
+
+/** A plain answer to an approval. */
+export type ApprovalDecision = "allow" | "allow-session" | "deny" | "cancel";
+
+/**
+ * A rule an approval can save (Codex): allow later commands that start with
+ * `prefix` without asking, or allow or block a network host.
+ */
+export type ApprovalRule =
+  | { kind: "command-prefix"; prefix: string[] }
+  | { kind: "network"; host: string; action: "allow" | "deny" };
+
+/** The answer to an `ApprovalRequest`. */
+export interface ApprovalResponse {
+  decision: ApprovalDecision;
+  /** Why, for a denial the agent should read. */
+  message?: string;
+  /** With `allow`: one of the request's `rules` to save. Codex only. */
+  rule?: ApprovalRule;
+  /**
+   * With `allow` or `allow-session` on a `permissions` request: which of the
+   * requested parts to grant. A part left out or false is refused. Without
+   * it, everything requested is granted. Codex only.
+   */
+  grant?: { network?: boolean; fileSystem?: boolean };
+  /**
+   * With a `permissions` grant: have Codex review every later command in
+   * the turn before it runs. Codex only.
+   */
+  strictReview?: boolean;
 }
 
 /** The agent asked the user one or more questions. */

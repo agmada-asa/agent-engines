@@ -33,6 +33,8 @@ export {
   codexUsage,
   type CodexEngineOptions,
   type CodexToolCall,
+  type CodexToolContent,
+  type CodexToolResult,
 } from "./codex/engine.ts";
 export {
   CLAUDE_CAPABILITIES,

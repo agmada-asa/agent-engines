@@ -402,6 +402,30 @@ test("host tool calls go to onToolCall", async () => {
   await engine.close();
 });
 
+test("a host tool can return images and audio as well as text", async () => {
+  const { spawn, children } = fakeSpawner(handlers());
+  const engine = new CodexEngine({
+    spawnProcess: spawn,
+    onToolCall: async () => ({
+      text: "Here is the chart",
+      content: [{ type: "image", url: "data:image/png;base64,AAAA" }, { type: "audio", url: "https://x.test/a.wav" }, { type: "text", text: "and a note" }],
+      success: true,
+    }),
+  });
+  await engine.startThread({ cwd: "/tmp", codex: { dynamicTools: [{ name: "chart", description: "Draws", inputSchema: { type: "object" } }] } });
+  const result = await children[0].ask("item/tool/call", { threadId: THREAD, turnId: "t", callId: "c1", tool: "chart", namespace: null, arguments: {} });
+  assert.deepEqual(result, {
+    contentItems: [
+      { type: "inputText", text: "Here is the chart" },
+      { type: "inputImage", imageUrl: "data:image/png;base64,AAAA" },
+      { type: "inputAudio", audioUrl: "https://x.test/a.wav" },
+      { type: "inputText", text: "and a note" },
+    ],
+    success: true,
+  });
+  await engine.close();
+});
+
 test("a usage limit fails the turn with its reset time", async () => {
   const { spawn, children } = fakeSpawner(handlers());
   const engine = new CodexEngine({ spawnProcess: spawn });
