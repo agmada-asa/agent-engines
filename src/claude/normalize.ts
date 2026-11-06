@@ -429,6 +429,12 @@ export class ClaudeNormalizer {
         return typeof m.content === "string" && m.content
           ? [{ ...base, type: "notice", kind: m.level === "warning" ? "warning" : "info", message: m.content, raw: m }]
           : [];
+      case "session_writes_lost": {
+        // This can arrive after the final result; completed turns remain valid.
+        const lost = (Array.isArray(m.lost) ? m.lost : []).map((kind: string) => kind === "transcript" ? "session transcript" : kind === "global_config" ? "global configuration" : kind);
+        const reason = m.error_code === "ENOSPC" ? "the disk is full" : m.error_code === "EDQUOT" ? "the disk quota is exhausted" : m.error_code ? `error ${String(m.error_code)}` : "a write error";
+        return [{ ...base, type: "notice", kind: "warning", message: `Claude Code could not save ${lost.length ? lost.join(" and ") : "session data"}: ${reason}.`, raw: m }];
+      }
       case "permission_denied":
         return [{
           ...base,

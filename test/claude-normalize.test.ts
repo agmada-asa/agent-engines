@@ -3,10 +3,31 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
 import { ClaudeNormalizer, claudeRateLimit, claudeTranscript, claudeUsage, classifyClaudeError } from "../src/claude/normalize.ts";
-import type { SDKMessage } from "@anthropic-ai/claude-agent-sdk";
+import type { SDKMessage, SDKSessionWritesLostMessage } from "@anthropic-ai/claude-agent-sdk";
 
 const S = "session-1";
 const msg = (value: Record<string, unknown>) => value as unknown as SDKMessage;
+
+test("session save failures warn about unsaved data and preserve the affected session IDs", () => {
+  const n = new ClaudeNormalizer(S);
+  const cases: Array<{ lost: SDKSessionWritesLostMessage["lost"]; error_code: SDKSessionWritesLostMessage["error_code"]; message: string }> = [
+    { lost: ["transcript"], error_code: "ENOSPC", message: "Claude Code could not save session transcript: the disk is full." },
+    { lost: ["global_config"], error_code: "EDQUOT", message: "Claude Code could not save global configuration: the disk quota is exhausted." },
+    { lost: ["transcript", "global_config"], error_code: "ENOSPC", message: "Claude Code could not save session transcript and global configuration: the disk is full." },
+  ];
+  for (const { lost, error_code, message } of cases) {
+    const raw: SDKSessionWritesLostMessage = {
+      type: "system", subtype: "session_writes_lost", uuid: "00000000-0000-4000-8000-000000000001", session_id: S, lost, error_code,
+      ...(lost.includes("transcript") ? { transcript_session_ids: ["earlier-session", S] } : {}),
+    };
+    assert.deepEqual(n.normalize(raw, ""), [{ threadId: S, turnId: "", type: "notice", kind: "warning", message, raw }]);
+  }
+  // Codes and kinds the SDK adds later still produce a readable warning.
+  const future = msg({ type: "system", subtype: "session_writes_lost", session_id: S, lost: ["memory"], error_code: "EIO" });
+  assert.equal((n.normalize(future, "")[0] as { message: string }).message, "Claude Code could not save memory: error EIO.");
+  const bare = msg({ type: "system", subtype: "session_writes_lost", session_id: S });
+  assert.equal((n.normalize(bare, "")[0] as { message: string }).message, "Claude Code could not save session data: a write error.");
+});
 
 test("network and service failures remain recoverable without masking sign-in errors", () => {
   const rejected = { status: "rejected" as const, resetsAt: new Date("2026-10-22T13:00:00Z") };
