@@ -246,6 +246,19 @@ test("a command approval offers Codex's lasting rules, and allowing with one sav
   await (host.request as any).respond({ decision: "allow", rule: { kind: "network", host: "api.test", action: "allow" } });
   assert.deepEqual(await host.response, { decision: { applyNetworkPolicyAmendment: { network_policy_amendment: { host: "api.test", action: "allow" } } } });
 
+  // A rule goes with its own decision: a block with deny, the rest with allow.
+  const blockParams = {
+    ...params,
+    availableDecisions: ["accept", { applyNetworkPolicyAmendment: { network_policy_amendment: { host: "api.test", action: "deny" } } }, "decline"],
+  };
+  const block = codexRequest(25, "item/commandExecution/requestApproval", blockParams)!;
+  const blockRequest = block.request as Extract<AgentRequest, { kind: "approval" }>;
+  const blockRule = { kind: "network", host: "api.test", action: "deny" } as const;
+  await assert.rejects(blockRequest.respond({ decision: "allow", rule: blockRule }), /goes with the decision "deny"/);
+  await assert.rejects(request.respond({ decision: "allow-session", rule: { kind: "command-prefix", prefix: ["curl"] } }), /goes with the decision "allow"/);
+  await blockRequest.respond({ decision: "deny", rule: blockRule });
+  assert.deepEqual(await block.response, { decision: { applyNetworkPolicyAmendment: { network_policy_amendment: { host: "api.test", action: "deny" } } } });
+
   // A server that sends no decision list still has its proposals offered.
   const older = codexRequest(22, "item/commandExecution/requestApproval", {
     threadId: T, turnId: "turn-1", itemId: "c", command: "npm test",

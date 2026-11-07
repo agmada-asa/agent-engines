@@ -632,8 +632,11 @@ export function codexRequest(
       ...(rules.length ? { rules } : {}),
       raw: params,
       respond: async ({ decision, rule }) => {
-        if (rule && decision === "allow") {
+        if (rule) {
           if (!rules.some((offer) => sameRule(offer, rule))) throw new AgentEngineError("Codex did not offer that rule for this approval; pick one from `rules`.");
+          // A rule that blocks a host goes with a denial; every other rule with an approval.
+          const fits = rule.kind === "network" && rule.action === "deny" ? "deny" : "allow";
+          if (decision !== fits) throw new AgentEngineError(`That rule goes with the decision "${fits}", not "${decision}".`);
           return answer(rule.kind === "command-prefix"
             ? { decision: { acceptWithExecpolicyAmendment: { execpolicy_amendment: rule.prefix } } }
             : { decision: { applyNetworkPolicyAmendment: { network_policy_amendment: { host: rule.host, action: rule.action } } } });

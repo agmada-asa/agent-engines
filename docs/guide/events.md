@@ -32,7 +32,7 @@ Codex approvals can carry more:
 
 - `decisions` lists the plain answers Codex offers for this request. When it's missing, all four are fine.
 - `network` names the host when the command needs network access.
-- `rules` are lasting rules Codex offers to save: allow later commands that start with a prefix, or allow or block a host. Answer `{ decision: "allow", rule }` with one of them. A rule Codex didn't offer is refused.
+- `rules` are lasting rules Codex offers to save: allow later commands that start with a prefix, or allow or block a host. Answer with one of them as `rule`: `{ decision: "allow", rule }`, or `{ decision: "deny", rule }` for a rule that blocks a host. A rule Codex didn't offer, or with the other decision, is refused.
 - A `permissions` request can be granted in part: `{ decision: "allow", grant: { network: true } }` grants the network and refuses the file-system access. `strictReview: true` has Codex review every later command in the turn.
 
 ## File changes

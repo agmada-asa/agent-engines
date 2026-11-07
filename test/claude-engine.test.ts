@@ -215,6 +215,7 @@ test("a steer Claude keeps after an interrupt runs as its own turn, with a warni
   const events: AgentEvent[] = [];
   thread.subscribe((event) => events.push(event));
   const turn = thread.run("Long task");
+  const own = collect(turn);
   await until(() => queries[0].inputs.length === 1);
   await turn.steer("Also this");
   await until(() => queries[0].inputs.length === 2);
@@ -224,7 +225,11 @@ test("a steer Claude keeps after an interrupt runs as its own turn, with a warni
   const warning = events.find((event) => event.type === "notice");
   assert.equal(warning?.type === "notice" && warning.kind, "warning");
   assert.equal(warning?.turnId, result.turnId);
-  assert.match(warning?.type === "notice" ? warning.message : "", /kept a steer/);
+  assert.match(warning?.type === "notice" ? warning.message : "", /kept a steer .* will run it as a new turn/);
+  // The turn's own events carry the warning too, before the turn ends.
+  const ownTypes = (await own).map((event) => event.type);
+  assert.ok(ownTypes.includes("notice"));
+  assert.ok(ownTypes.indexOf("notice") < ownTypes.indexOf("turn.completed"));
   await until(() => events.some((event) => event.type === "turn.completed" && event.turnId !== result.turnId));
   const next = events.find((event) => event.type === "turn.completed" && event.turnId !== result.turnId);
   assert.equal(next?.type === "turn.completed" && next.status, "completed");
@@ -281,6 +286,61 @@ test("an interrupt before Claude starts the prompt takes the prompt back and end
   const result = await turn.result;
   assert.equal(result.status, "interrupted");
   assert.equal(result.turnId, queries[0].inputs[0].uuid);
+  await engine.close();
+});
+
+test("a prompt Claude neither gives back nor starts ends the turn after the grace period, and is stopped if it runs late", async () => {
+  const { sdk, queries } = fakeClaudeSdk({
+    // Held behind start-up work: listed, not cancellable, and no output follows.
+    onInterrupt: (query) => ({ still_queued: [query.inputs[0]!.uuid as string] }),
+    onCancel: () => false,
+  });
+  const engine = new ClaudeEngine({ sdk, interruptGraceMs: 20 });
+  const thread = await engine.startThread({ cwd: "/tmp" });
+  const events: AgentEvent[] = [];
+  thread.subscribe((event) => events.push(event));
+  const turn = thread.run("Never mind");
+  await until(() => queries[0].inputs.length === 1);
+  await turn.interrupt();
+  const result = await turn.result;
+  assert.equal(result.status, "interrupted");
+  const interrupts = () => queries[0].calls.filter((call) => call.method === "interrupt").length;
+  assert.equal(interrupts(), 1);
+
+  // It runs after all: the turn it starts is stopped at once and ends as interrupted.
+  replyMessages("Late reply", "msg_late").forEach((m) => queries[0].emit(m));
+  await until(() => events.some((event) => event.type === "turn.completed" && event.turnId !== result.turnId));
+  const late = events.find((event) => event.type === "turn.completed" && event.turnId !== result.turnId);
+  assert.equal(late?.type === "turn.completed" && late.status, "interrupted");
+  assert.equal(interrupts(), 2);
+
+  // The next prompt is not stopped.
+  const next = thread.run("Hi");
+  await until(() => queries[0].inputs.length === 2);
+  replyMessages("Hello", "msg_2").forEach((m) => queries[0].emit(m));
+  assert.equal((await next.result).status, "completed");
+  assert.equal(interrupts(), 2);
+  await engine.close();
+});
+
+test("a prompt Claude would not give back but then starts is interrupted when it runs, not given up on", async () => {
+  const { sdk, queries } = fakeClaudeSdk({
+    onInterrupt: (query) => {
+      const running = queries[0]!.calls.filter((call) => call.method === "interrupt").length > 1;
+      if (running) query.emit({ type: "result", subtype: "error_during_execution", is_error: true, errors: ["aborted"], modelUsage: {} });
+      return { still_queued: running ? [] : [query.inputs[0]!.uuid as string] };
+    },
+    onCancel: () => false,
+  });
+  const engine = new ClaudeEngine({ sdk, interruptGraceMs: 60_000 });
+  const thread = await engine.startThread({ cwd: "/tmp" });
+  const turn = thread.run("Stop me");
+  await until(() => queries[0].inputs.length === 1);
+  await turn.interrupt();
+  queries[0].emit({ type: "stream_event", parent_tool_use_id: null, event: { type: "message_start", message: { id: "m" } } });
+  const result = await turn.result;
+  assert.equal(result.status, "interrupted");
+  assert.equal(queries[0].calls.filter((call) => call.method === "interrupt").length, 2);
   await engine.close();
 });
 

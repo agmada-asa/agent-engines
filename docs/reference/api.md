@@ -30,7 +30,7 @@
 
 A turn is an async iterable of `AgentEvent`s, plus `id`, `steer()`, `interrupt()` and `result`. `result` never rejects.
 
-On Claude, `interrupt()` also takes back the turn's steers that haven't run yet. If Claude has already started one, it runs as a new turn, and the interrupted turn gets a `warning` notice saying so.
+On Claude, `interrupt()` also takes back the turn's steers that haven't run yet. If Claude has already started one, it runs as a new turn, and the interrupted turn gets a `warning` notice saying so. If Claude neither gives back the turn's own prompt nor starts it, the turn ends as `interrupted` after `ClaudeEngineOptions.interruptGraceMs` (15 seconds by default).
 
 For Codex, `ModelInfo.serviceTiers` lists `ServiceTierInfo` entries. `Thread.serviceTier` and `TurnResult.serviceTier` use `ServiceTierSelection` to distinguish requested and acknowledged settings. See [speed tiers](/guide/models#requested-and-accepted-tiers) for the scope and confirmation limits.
 

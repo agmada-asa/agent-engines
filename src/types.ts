@@ -1263,8 +1263,8 @@ export interface ApprovalRequest {
   decisions?: ApprovalDecision[];
   /**
    * Lasting rules the runtime offers to save with an approval (Codex
-   * commands). Answer `{ decision: "allow", rule }` with one of them to
-   * approve this command and save the rule.
+   * commands). Answer with one of them as `rule` to save it: with `allow` to
+   * approve this command, or `deny` for a rule that blocks a host.
    */
   rules?: ApprovalRule[];
   /** The runtime's own request, for anything not normalised. */
@@ -1288,7 +1288,10 @@ export interface ApprovalResponse {
   decision: ApprovalDecision;
   /** Why, for a denial the agent should read. */
   message?: string;
-  /** With `allow`: one of the request's `rules` to save. Codex only. */
+  /**
+   * One of the request's `rules` to save. It goes with `deny` when it blocks a
+   * host, and with `allow` otherwise; any other pairing is refused. Codex only.
+   */
   rule?: ApprovalRule;
   /**
    * With `allow` or `allow-session` on a `permissions` request: which of the

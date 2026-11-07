@@ -106,6 +106,12 @@ const PROBE_TIMEOUT_MS = 30_000;
 /** How long a prewarmed thread waits for a `startThread` to claim it before it is closed. */
 const SPARE_TTL_MS = 10 * 60_000;
 
+/** Default `interruptGraceMs`. */
+const INTERRUPT_GRACE_MS = 15_000;
+
+/** Longest Claude's messages wait while an interrupt's receipt is settled. */
+const SETTLE_LIMIT_MS = 5_000;
+
 /** Built-in tools that change files or run commands; off in `read-only` access. */
 const WRITE_TOOLS = ["Edit", "Write", "MultiEdit", "NotebookEdit", "Bash"];
 
@@ -181,6 +187,13 @@ export interface ClaudeEngineOptions {
    * at two folders to use two accounts side by side.
    */
   configDir?: string;
+  /**
+   * How long an interrupted turn waits for a prompt Claude neither gave back
+   * nor started. Claude drops such a prompt without a result if it was still
+   * held back (behind start-up work, say), so the turn then ends as
+   * `interrupted`. Defaults to 15 seconds.
+   */
+  interruptGraceMs?: number;
 }
 
 /** Turns a `TurnInput` into SDK message content: images and PDFs as blocks, text files as documents, anything else by path. */
@@ -772,6 +785,16 @@ class ClaudeThread implements Thread {
    * arrives before it reads the prompt, so it is sent again once the turn runs.
    */
   private pendingStop?: () => Promise<void>;
+  /**
+   * Set while an interrupt's receipt is being settled. Claude's messages wait
+   * for it, so the interrupted turn still gets the receipt's warning before
+   * its result ends it.
+   */
+  private settling?: Promise<void>;
+  /** Ends an interrupted turn whose prompt Claude neither gave back nor started. */
+  private giveUp?: ReturnType<typeof setTimeout>;
+  /** A prompt given up on may still run late: the turn it starts is stopped at once. */
+  private abandoned = false;
   private lastText = "";
   private expectedModel?: string;
   private prompted: boolean;
@@ -1053,6 +1076,7 @@ class ClaudeThread implements Thread {
     if (this.closed) return;
     this.closed = true;
     this.cancelRequests();
+    clearTimeout(this.giveUp);
     if (this.current && !this.current.done) this.finish(this.current, { status: "interrupted" });
     this.engine.forget(this);
     this.input?.end();
@@ -1075,8 +1099,13 @@ class ClaudeThread implements Thread {
         this.interruptRequested = true;
         const stop = async () => {
           const query = this.query;
-          const receipt = await query?.interrupt();
-          if (query && receipt) await this.withdraw(turn, query, receipt.still_queued, steers);
+          if (!query) return;
+          const settled = (async () => {
+            const receipt = await query.interrupt();
+            if (receipt) await this.withdraw(turn, query, receipt.still_queued, steers);
+          })();
+          this.hold(settled);
+          await settled;
         };
         if (!this.turnRunning) this.pendingStop = stop;
         await stop();
@@ -1087,6 +1116,7 @@ class ClaudeThread implements Thread {
     this.interruptRequested = false;
     this.turnRunning = false;
     this.pendingStop = undefined;
+    this.abandoned = false;
     this.lastText = "";
     this.normalizer.startTurn();
     this.dispatch({ threadId: this.id, turnId: turn.turnId!, type: "turn.started" });
@@ -1105,22 +1135,60 @@ class ClaudeThread implements Thread {
     // The SDK has the method but does not type it yet.
     const cancel = (query as unknown as { cancelAsyncMessage?: (uuid: string) => Promise<boolean> }).cancelAsyncMessage;
     let kept = 0;
+    let prompt: "withdrawn" | "kept" | undefined;
     for (const uuid of ours) {
       // Each steer is settled once, so a second interrupt does not warn about it again.
       steers.delete(uuid);
       const cancelled = typeof cancel === "function" ? await cancel.call(query, uuid).catch(() => false) : false;
-      // A withdrawn prompt never produces a result, so the turn ends here. A prompt
-      // Claude would not give back still belongs to this turn and ends it.
-      if (uuid === turn.turnId) {
-        if (cancelled) this.finish(turn, { status: "interrupted" });
-      } else if (!cancelled) kept++;
+      if (uuid === turn.turnId) prompt = cancelled ? "withdrawn" : "kept";
+      else if (!cancelled) kept++;
     }
+    // Sent before the turn can end, so it reaches the turn as well as the thread's listeners.
     if (kept) {
       this.dispatch({
         threadId: this.id, turnId: turn.turnId!, type: "notice", kind: "warning",
-        message: `Claude kept ${kept === 1 ? "a steer" : `${kept} steers`} sent before the interrupt and runs ${kept === 1 ? "it" : "them"} as a new turn.`,
+        message: `Claude kept ${kept === 1 ? "a steer" : `${kept} steers`} sent before the interrupt and will run ${kept === 1 ? "it" : "them"} as a new turn.`,
       });
     }
+    // A withdrawn prompt never produces a result, so the turn ends here.
+    if (prompt === "withdrawn") this.finish(turn, { status: "interrupted" });
+    // A prompt Claude would not give back either starts soon, and the interrupt is
+    // sent again when it does, or was held back and is dropped without a result.
+    // The wait is bounded so a dropped prompt cannot leave the turn open.
+    else if (prompt === "kept" && !this.turnRunning) this.waitForPrompt(turn, kept === 0);
+  }
+
+  /**
+   * Ends `turn` as interrupted if Claude has not started it within the grace
+   * period. With `stopLate`, a turn Claude starts afterwards, before the next
+   * prompt, is taken to be the late prompt and stopped. Not when steers were
+   * kept, since those are meant to run.
+   */
+  private waitForPrompt(turn: TurnHandle, stopLate: boolean): void {
+    clearTimeout(this.giveUp);
+    this.giveUp = setTimeout(() => {
+      this.giveUp = undefined;
+      if (turn.done || this.current !== turn || this.turnRunning) return;
+      this.finish(turn, { status: "interrupted" });
+      this.abandoned = stopLate;
+    }, this.engine.options.interruptGraceMs ?? INTERRUPT_GRACE_MS);
+    this.giveUp.unref?.();
+  }
+
+  /** Holds Claude's messages until `work` settles, for at most `SETTLE_LIMIT_MS`. */
+  private hold(work: Promise<unknown>): void {
+    let timer: ReturnType<typeof setTimeout> | undefined;
+    const limit = new Promise<void>((resolve) => {
+      timer = setTimeout(resolve, SETTLE_LIMIT_MS);
+      timer.unref?.();
+    });
+    const gate: Promise<void> = Promise.all([this.settling, Promise.race([work.then(() => undefined, () => undefined), limit])])
+      .then(() => undefined)
+      .finally(() => {
+        clearTimeout(timer);
+        if (this.settling === gate) this.settling = undefined;
+      });
+    this.settling = gate;
   }
 
   /** The live query, starting a new process on the same session if the last one ended. */
@@ -1151,7 +1219,10 @@ class ClaudeThread implements Thread {
   private async pump(query: Query): Promise<void> {
     let failure: unknown;
     try {
-      for await (const message of query) this.handle(message);
+      for await (const message of query) {
+        if (this.settling) await this.settling;
+        this.handle(message);
+      }
     } catch (error) {
       failure = error;
     }
@@ -1182,7 +1253,16 @@ class ClaudeThread implements Thread {
     }
     // The agent can start a turn on its own, such as when a background subagent reports back.
     const mainOutput = !m.parent_tool_use_id && !m.agent_id && (m.type === "assistant" || (m.type === "stream_event" && m.event?.type === "message_start"));
-    if (mainOutput && (!this.current || this.current.done)) this.newTurn();
+    if (mainOutput && (!this.current || this.current.done)) {
+      const late = this.abandoned;
+      this.newTurn();
+      // Most likely the prompt an interrupt gave up on, starting after all: stop it too.
+      if (late) {
+        this.interruptRequested = true;
+        this.turnRunning = true;
+        void this.query?.interrupt().catch(() => undefined);
+      }
+    }
     const turn = this.current && !this.current.done ? this.current : undefined;
     if (turn && !m.parent_tool_use_id && !m.agent_id && (m.type === "assistant" || m.type === "stream_event")) {
       this.turnRunning = true;
@@ -1222,7 +1302,11 @@ class ClaudeThread implements Thread {
 
   private finish(turn: TurnHandle, outcome: { status: TurnResult["status"]; text?: string; output?: unknown; usage?: ReturnType<typeof claudeUsage>; error?: TurnResult["error"] }): void {
     if (turn.done) return;
-    if (turn === this.current) this.pendingStop = undefined;
+    if (turn === this.current) {
+      this.pendingStop = undefined;
+      clearTimeout(this.giveUp);
+      this.giveUp = undefined;
+    }
     const base = { threadId: this.id, turnId: turn.turnId! };
     const usage = outcome.usage ? { usage: outcome.usage } : {};
     const output = outcome.output !== undefined ? { output: outcome.output } : {};
@@ -1424,7 +1508,6 @@ class ClaudeThread implements Thread {
   }
 }
 
-/** Thread MCP servers in the SDK's shape. */
 /** Custom subagents in the SDK's shape: neutral fields, then Claude's own, then `extra`. */
 function claudeAgents(agents: NonNullable<ThreadOptions["agents"]>): Record<string, SdkAgentDefinition> {
   return Object.fromEntries(Object.entries(agents).map(([name, agent]) => {
@@ -1460,6 +1543,7 @@ function claudeAgents(agents: NonNullable<ThreadOptions["agents"]>): Record<stri
   }));
 }
 
+/** Thread MCP servers in the SDK's shape. */
 function claudeMcpServers(servers: NonNullable<ThreadOptions["mcpServers"]>): Record<string, McpServerConfig> {
   const config: Record<string, McpServerConfig> = {};
   for (const [name, server] of Object.entries(servers)) {
