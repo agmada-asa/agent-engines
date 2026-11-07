@@ -1147,6 +1147,12 @@ export type AgentEvent = EventBase &
     | { type: "text.done"; itemId: string; text: string; phase?: MessagePhase }
     | { type: "reasoning.delta"; itemId: string; delta: string }
     | { type: "reasoning.done"; itemId: string; text: string }
+    /**
+     * The model is still writing a tool call's input (Claude). Sent when the call
+     * begins, with `characters` 0, and again as the input grows, so a long write
+     * shows before `tool.started`. `itemId` is the one `tool.started` will carry.
+     */
+    | { type: "tool.input.progress"; itemId: string; name: string; characters: number }
     | { type: "tool.started"; itemId: string; tool: ToolCall }
     | { type: "tool.completed"; itemId: string; tool: ToolCall; output?: string; media?: ToolMedia[]; isError: boolean }
     /** Live output of a running command, in order. `tool.completed` still carries the whole output. */

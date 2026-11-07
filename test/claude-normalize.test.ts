@@ -63,6 +63,29 @@ test("streamed text and the whole message share an item ID", () => {
   assert.deepEqual(wholeText, [{ threadId: S, turnId: "t", type: "text.done", itemId: "m1:text:0", text: "Hi" }]);
 });
 
+test("a tool call's streaming input is reported as it grows, before the call starts", () => {
+  const n = new ClaudeNormalizer(S);
+  /** A stream event from the main agent, or from the subagent run by tool call `parent`. */
+  const stream = (event: Record<string, unknown>, parent: string | null = null) => n.normalize(msg({ type: "stream_event", parent_tool_use_id: parent, event }), "t");
+  stream({ type: "message_start", message: { id: "m1" } });
+  assert.deepEqual(stream({ type: "content_block_start", index: 0, content_block: { type: "tool_use", id: "w1", name: "Write", input: {} } }), [
+    { threadId: S, turnId: "t", type: "tool.input.progress", itemId: "w1", name: "Write", characters: 0 },
+  ]);
+  const chunk = (size: number) => stream({ type: "content_block_delta", index: 0, delta: { type: "input_json_delta", partial_json: "x".repeat(size) } });
+  // Nothing until another 2,000 characters have arrived, then one event with the running total.
+  assert.deepEqual(chunk(1_500), []);
+  assert.deepEqual(chunk(600), [{ threadId: S, turnId: "t", type: "tool.input.progress", itemId: "w1", name: "Write", characters: 2_100 }]);
+  assert.deepEqual(chunk(1_000), []);
+  assert.deepEqual(stream({ type: "content_block_stop", index: 0 }), []);
+  // A stopped block reports nothing more.
+  assert.deepEqual(chunk(5_000), []);
+  // MCP calls are named as their tool.started will be, and a subagent's are tagged with it.
+  stream({ type: "message_start", message: { id: "m2" } }, "agent-call");
+  assert.deepEqual(stream({ type: "content_block_start", index: 1, content_block: { type: "mcp_tool_use", id: "p1", server_name: "notes", name: "search" } }, "agent-call"), [
+    { threadId: S, turnId: "t", agentId: "agent-call", type: "tool.input.progress", itemId: "p1", name: "mcp__notes__search", characters: 0 },
+  ]);
+});
+
 test("tool use and results, with file changes from Edit and Write", () => {
   const n = new ClaudeNormalizer(S);
   const started = n.normalize(msg({ type: "assistant", parent_tool_use_id: null, message: { id: "m", content: [
