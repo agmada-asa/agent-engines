@@ -8,7 +8,7 @@ A turn is an async iterable of `AgentEvent`s. `thread.subscribe()` sees every ev
 | --- | --- |
 | Turn | `turn.started`, `turn.completed`, `turn.failed` |
 | Text | `text.delta`, `text.done`, `reasoning.delta`, `reasoning.done` |
-| Tools | `tool.started`, `tool.output.delta`, `tool.progress`, `tool.completed` |
+| Tools | `tool.input.progress`, `tool.started`, `tool.output.delta`, `tool.progress`, `tool.completed` |
 | Files | `file.changed`, `diff.updated` |
 | Plans | `plan.updated`, `plan.proposal.delta`, `plan.proposal.done` |
 | Background work | `status`, `task.started`, `task.progress`, `task.ended`, `subagent.started`, `subagent.ended` |
@@ -51,6 +51,7 @@ These events are for showing work as it happens. None of them changes a turn's r
 
 | Event | Codex | Claude |
 | --- | --- | --- |
+| `tool.input.progress` | Not sent | A tool call's `name` as the model starts writing it, then the running `characters` of its input about every 2,000 characters. `tool.started` follows with the same `itemId` once the input is complete, which for a large Write can be minutes later |
 | `tool.output.delta` | Command output as it streams | Not sent; the SDK doesn't stream command output |
 | `tool.progress` | MCP tool progress `message` | `elapsedSeconds` of a running tool |
 | `diff.updated` | The turn's whole unified diff so far, replacing the last one | Not sent; use `file.changed` |

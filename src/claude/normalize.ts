@@ -8,6 +8,9 @@
  * `parent_tool_use_id` or `agent_id`, are tagged with that ID as `agentId`.
  * Other tasks (background shells, monitors, workflows, MCP tasks) surface as
  * `task.*` events, and `task_progress` reports progress on either kind.
+ *
+ * Streamed partial messages give `text.delta` and `reasoning.delta`, and
+ * `tool.input.progress` while a tool call's input is still being written.
  */
 
 import { USAGE_LIMIT_ERROR_PREFIXES, type ModelUsage, type SDKMessage } from "@anthropic-ai/claude-agent-sdk";
@@ -77,6 +80,29 @@ export function claudeRateLimit(info: Json | undefined): RateLimit | undefined {
 
 /** Built-in tools that write files; their results become `file.changed` events. */
 const FILE_TOOLS = new Set(["Edit", "Write", "MultiEdit", "NotebookEdit"]);
+
+/** Content block types that are tool calls. */
+const TOOL_BLOCKS = new Set(["tool_use", "server_tool_use", "mcp_tool_use"]);
+
+/**
+ * Input characters streamed between two `tool.input.progress` events for one
+ * call, about 500 tokens. Small enough to show a long write moving, large
+ * enough not to send an event per token.
+ */
+const INPUT_PROGRESS_STEP = 2_000;
+
+/** A tool call block's name; an MCP block is named after its server too, as Claude Code names MCP tools. */
+function toolUseName(block: Json): string {
+  return block.type === "mcp_tool_use" ? `mcp__${block.server_name}__${block.name}` : String(block.name);
+}
+
+/** A tool call whose input is still streaming: how much has arrived and how much was last reported. */
+interface StreamingTool {
+  itemId: string;
+  name: string;
+  characters: number;
+  reported: number;
+}
 
 /** A Claude tool_use block as a neutral tool call. */
 export function claudeTool(name: string, input: unknown): ToolCall {
@@ -175,6 +201,8 @@ export class ClaudeNormalizer {
   /** message id → block type → count, so streamed and whole blocks get the same item IDs. */
   private readonly streamCounts = new Map<string, Map<string, number>>();
   private readonly wholeCounts = new Map<string, Map<string, number>>();
+  /** message id → block index → tool call whose input is streaming, until its block stops. */
+  private readonly streamTools = new Map<string, Map<number, StreamingTool>>();
   private currentMessageId = new Map<string, string>();
 
   constructor(readonly threadId: string) {}
@@ -245,17 +273,40 @@ export class ClaudeNormalizer {
       return [];
     }
     const messageId = this.currentMessageId.get(stream) ?? "";
+    const index = Number(event.index);
     if (event.type === "content_block_start") {
-      const type = String(event.content_block?.type ?? "");
+      const block = record(event.content_block) ?? {};
+      const type = String(block.type ?? "");
+      // A tool call's input can take minutes to stream (a whole file for Write), and
+      // `tool.started` waits for all of it, so its start and growth are reported here.
+      if (TOOL_BLOCKS.has(type) && typeof block.id === "string" && block.id) {
+        const tool: StreamingTool = { itemId: block.id, name: toolUseName(block), characters: 0, reported: 0 };
+        if (!this.streamTools.has(messageId)) this.streamTools.set(messageId, new Map());
+        this.streamTools.get(messageId)!.set(index, tool);
+        return [{ ...base, type: "tool.input.progress", itemId: tool.itemId, name: tool.name, characters: 0 }];
+      }
       if (type !== "text" && type !== "thinking") return [];
       const itemId = this.itemId(this.streamCounts, messageId, type);
       if (!this.streamBlocks.has(messageId)) this.streamBlocks.set(messageId, new Map());
-      this.streamBlocks.get(messageId)!.set(Number(event.index), itemId);
+      this.streamBlocks.get(messageId)!.set(index, itemId);
+      return [];
+    }
+    if (event.type === "content_block_stop") {
+      const tools = this.streamTools.get(messageId);
+      if (tools?.delete(index) && !tools.size) this.streamTools.delete(messageId);
       return [];
     }
     if (event.type === "content_block_delta") {
-      const itemId = this.streamBlocks.get(messageId)?.get(Number(event.index));
       const delta = record(event.delta) ?? {};
+      if (delta.type === "input_json_delta" && typeof delta.partial_json === "string") {
+        const tool = this.streamTools.get(messageId)?.get(index);
+        if (!tool) return [];
+        tool.characters += delta.partial_json.length;
+        if (tool.characters - tool.reported < INPUT_PROGRESS_STEP) return [];
+        tool.reported = tool.characters;
+        return [{ ...base, type: "tool.input.progress", itemId: tool.itemId, name: tool.name, characters: tool.characters }];
+      }
+      const itemId = this.streamBlocks.get(messageId)?.get(index);
       if (!itemId) return [];
       if (delta.type === "text_delta" && typeof delta.text === "string") return [{ ...base, type: "text.delta", itemId, delta: delta.text }];
       if (delta.type === "thinking_delta" && typeof delta.thinking === "string") return [{ ...base, type: "reasoning.delta", itemId, delta: delta.thinking }];
@@ -281,8 +332,8 @@ export class ClaudeNormalizer {
         events.push({ ...base, type: "text.done", itemId: this.itemId(this.wholeCounts, messageId, "text"), text: block.text });
       } else if (block?.type === "thinking" && typeof block.thinking === "string") {
         events.push({ ...base, type: "reasoning.done", itemId: this.itemId(this.wholeCounts, messageId, "thinking"), text: block.thinking });
-      } else if (block?.type === "tool_use" || block?.type === "server_tool_use" || block?.type === "mcp_tool_use") {
-        const name = block.type === "mcp_tool_use" ? `mcp__${block.server_name}__${block.name}` : String(block.name);
+      } else if (TOOL_BLOCKS.has(block?.type)) {
+        const name = toolUseName(block);
         const tool = claudeTool(name, block.input);
         this.tools.set(String(block.id), tool);
         events.push({ ...base, type: "tool.started", itemId: String(block.id), tool });
