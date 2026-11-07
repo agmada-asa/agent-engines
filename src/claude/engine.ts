@@ -112,6 +112,20 @@ const INTERRUPT_GRACE_MS = 15_000;
 /** Longest Claude's messages wait while an interrupt's receipt is settled. */
 const SETTLE_LIMIT_MS = 5_000;
 
+/** Longest an interrupt waits for steers sent before it to reach Claude. */
+const FLUSH_LIMIT_MS = 2_000;
+
+/** Waits for `work` to settle, for at most `ms`. Never rejects. */
+async function bounded(work: Promise<unknown>, ms: number): Promise<void> {
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  const limit = new Promise<void>((resolve) => {
+    timer = setTimeout(resolve, ms);
+    timer.unref?.();
+  });
+  await Promise.race([work.then(() => undefined, () => undefined), limit]);
+  clearTimeout(timer);
+}
+
 /** Built-in tools that change files or run commands; off in `read-only` access. */
 const WRITE_TOOLS = ["Edit", "Write", "MultiEdit", "NotebookEdit", "Bash"];
 
@@ -242,6 +256,8 @@ class InputQueue implements AsyncIterable<SDKUserMessage> {
   private readonly items: SDKUserMessage[] = [];
   private waiting?: () => void;
   private ended = false;
+  private taking = false;
+  private drains: (() => void)[] = [];
 
   push(message: SDKUserMessage): void {
     if (this.ended) throw new RuntimeConnectionError("The Claude Code process has ended.");
@@ -252,18 +268,42 @@ class InputQueue implements AsyncIterable<SDKUserMessage> {
   end(): void {
     this.ended = true;
     this.waiting?.();
+    this.drained();
+  }
+
+  /**
+   * Resolves once the SDK has taken every message pushed so far. It writes a
+   * message as it takes it, while control requests go straight out, so this
+   * keeps an interrupt from overtaking a steer sent just before it.
+   */
+  flushed(): Promise<void> {
+    if (this.ended || (!this.items.length && !this.taking)) return Promise.resolve();
+    return new Promise((resolve) => this.drains.push(resolve));
+  }
+
+  private drained(): void {
+    for (const resolve of this.drains.splice(0)) resolve();
   }
 
   async *[Symbol.asyncIterator](): AsyncIterator<SDKUserMessage> {
-    for (;;) {
-      const item = this.items.shift();
-      if (item) {
-        yield item;
-        continue;
+    try {
+      for (;;) {
+        const item = this.items.shift();
+        if (item) {
+          this.taking = true;
+          // Resumes when the SDK asks for the next message, after writing this one.
+          yield item;
+          this.taking = false;
+          if (!this.items.length) this.drained();
+          continue;
+        }
+        if (this.ended) return;
+        await new Promise<void>((resolve) => (this.waiting = resolve));
+        this.waiting = undefined;
       }
-      if (this.ended) return;
-      await new Promise<void>((resolve) => (this.waiting = resolve));
-      this.waiting = undefined;
+    } finally {
+      this.taking = false;
+      this.drained();
     }
   }
 }
@@ -1087,12 +1127,19 @@ class ClaudeThread implements Thread {
   private newTurn(): TurnHandle {
     // Each steer carries an ID so an interrupt's receipt can say whether it is still waiting.
     const steers = new Set<string>();
+    const sending = new Set<Promise<void>>();
     const turn: TurnHandle = new TurnHandle(this.id, {
       steer: async (input) => {
         if (turn.done || this.current !== turn) throw new SteerRejectedError("The turn has ended; start a new one.");
         const uuid = randomUUID();
         steers.add(uuid);
-        this.send(userMessage(await claudeContent(input), { priority: "next", uuid }));
+        const sent = (async () => this.send(userMessage(await claudeContent(input), { priority: "next", uuid })))();
+        sending.add(sent);
+        try {
+          await sent;
+        } finally {
+          sending.delete(sent);
+        }
       },
       interrupt: async () => {
         if (turn.done || this.current !== turn) return;
@@ -1101,6 +1148,8 @@ class ClaudeThread implements Thread {
           const query = this.query;
           if (!query) return;
           const settled = (async () => {
+            // Steers sent before the interrupt reach Claude first, so its receipt lists them.
+            await bounded(Promise.allSettled([...sending]).then(() => this.input?.flushed()), FLUSH_LIMIT_MS);
             const receipt = await query.interrupt();
             if (receipt) await this.withdraw(turn, query, receipt.still_queued, steers);
           })();
@@ -1177,15 +1226,9 @@ class ClaudeThread implements Thread {
 
   /** Holds Claude's messages until `work` settles, for at most `SETTLE_LIMIT_MS`. */
   private hold(work: Promise<unknown>): void {
-    let timer: ReturnType<typeof setTimeout> | undefined;
-    const limit = new Promise<void>((resolve) => {
-      timer = setTimeout(resolve, SETTLE_LIMIT_MS);
-      timer.unref?.();
-    });
-    const gate: Promise<void> = Promise.all([this.settling, Promise.race([work.then(() => undefined, () => undefined), limit])])
+    const gate: Promise<void> = Promise.all([this.settling, bounded(work, SETTLE_LIMIT_MS)])
       .then(() => undefined)
       .finally(() => {
-        clearTimeout(timer);
         if (this.settling === gate) this.settling = undefined;
       });
     this.settling = gate;
