@@ -17,7 +17,7 @@ What `startThread`, `resumeThread` and `forkThread` take, and what each option b
 | `title` | `thread/name/set` | SDK `title` | Ignored |
 | `outputSchema` | Per-turn `outputSchema` | `outputFormat` | Not supported |
 | `limits` | Not supported | `maxTurns`, `maxBudgetUsd`, task budget | Not supported |
-| `agents` | Agent roles (`agents.<name>` config with a role file) | SDK `agents` | Not supported |
+| `agents` | Agent roles (`agents.<name>` config with a role file): description, prompt, model and effort | SDK `agents`, with each agent's `claude` settings (MCP servers, skills, turn limit, background, memory, permission mode…) | Not supported |
 | `additionalDirectories` | Workspace sandbox writable roots | SDK `additionalDirectories` | Sent when the agent takes them |
 | `fileCheckpoints` | A git snapshot of the folder before each turn, for `rewind({ files: true })` | File checkpointing, for `rewind({ files: true })` | Ignored |
 | `seed` | Injected as history | Put before the first message | Put before the first message |
@@ -49,7 +49,7 @@ Anything specific to one runtime goes in `codex: {…}` or `claude: {…}`.
 - Network, also reasserted with the sandbox and approval policy on every turn
 - `baseInstructions`, which replaces Codex's base instructions entirely
 - `config` overrides
-- Host-answered `dynamicTools`
+- Host-answered `dynamicTools`. `CodexEngineOptions.onToolCall` answers them with text, and with images and audio as URLs in `content`
 - Ephemeral threads
 - [`listMcpTools`](/guide/agent-features#telling-a-codex-thread-its-tool-names)
 

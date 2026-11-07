@@ -163,6 +163,212 @@ test("interrupt ends the turn as interrupted", async () => {
   await engine.close();
 });
 
+test("an interrupt takes back a waiting steer, so nothing runs after the interrupted turn", async () => {
+  const { sdk, queries } = fakeClaudeSdk({
+    onUser: (_message, query) => {
+      if (query.inputs.length === 1) query.emit({ type: "stream_event", parent_tool_use_id: null, event: { type: "message_start", message: { id: "m" } } });
+    },
+    onInterrupt: (query) => {
+      const steer = query.inputs[1]!.uuid as string;
+      query.emit({ type: "result", subtype: "error_during_execution", is_error: true, errors: ["aborted"], queued_turn_count: 1, modelUsage: {} });
+      return { still_queued: [steer, "internal-cron"] };
+    },
+    onCancel: () => true,
+  });
+  const engine = new ClaudeEngine({ sdk });
+  const thread = await engine.startThread({ cwd: "/tmp" });
+  const events: AgentEvent[] = [];
+  thread.subscribe((event) => events.push(event));
+  const turn = thread.run("Long task");
+  await until(() => queries[0].inputs.length === 1);
+  await turn.steer("Also this");
+  await until(() => queries[0].inputs.length === 2);
+  const steerId = queries[0].inputs[1].uuid;
+  assert.match(steerId, /^[0-9a-f-]{36}$/);
+  await turn.interrupt();
+  const result = await turn.result;
+  assert.equal(result.status, "interrupted");
+  // Only the turn's own steer is taken back; an ID it did not send is left alone.
+  assert.deepEqual(queries[0].calls.filter((call) => call.method === "cancelAsyncMessage").map((call) => call.args[0]), [steerId]);
+  assert.equal(events.filter((event) => event.type === "notice").length, 0);
+  assert.equal(thread.activeTurn, undefined);
+  await engine.close();
+});
+
+test("an interrupt sent straight after a steer reaches Claude after it, so the steer is taken back", async () => {
+  const { sdk, queries } = fakeClaudeSdk({
+    onUser: (_message, query) => {
+      if (query.inputs.length === 1) query.emit({ type: "stream_event", parent_tool_use_id: null, event: { type: "message_start", message: { id: "m" } } });
+    },
+    onInterrupt: (query) => {
+      query.emit({ type: "result", subtype: "error_during_execution", is_error: true, errors: ["aborted"], modelUsage: {} });
+      // Claude lists only what it has read by now.
+      return { still_queued: query.inputs.slice(1).map((input) => input.uuid as string) };
+    },
+    onCancel: () => true,
+  });
+  const engine = new ClaudeEngine({ sdk });
+  const thread = await engine.startThread({ cwd: "/tmp" });
+  const turn = thread.run("Long task");
+  await until(() => queries[0].inputs.length === 1);
+  // Not awaited: the host steers and interrupts in the same tick.
+  const steered = turn.steer("Also this");
+  await turn.interrupt();
+  await steered;
+  assert.equal((await turn.result).status, "interrupted");
+  assert.deepEqual(queries[0].calls.filter((call) => call.method === "cancelAsyncMessage").map((call) => call.args[0]), [queries[0].inputs[1].uuid]);
+  await engine.close();
+});
+
+test("a steer Claude keeps after an interrupt runs as its own turn, with a warning", async () => {
+  const { sdk, queries } = fakeClaudeSdk({
+    onUser: (_message, query) => {
+      if (query.inputs.length === 1) query.emit({ type: "stream_event", parent_tool_use_id: null, event: { type: "message_start", message: { id: "m" } } });
+    },
+    onInterrupt: (query) => {
+      query.emit({ type: "result", subtype: "error_during_execution", is_error: true, errors: ["aborted"], queued_turn_count: 1, modelUsage: {} });
+      return { still_queued: [query.inputs[1]!.uuid as string] };
+    },
+    // Claude had already started it.
+    onCancel: (_uuid, query) => {
+      replyMessages("Did the steer", "msg_2").forEach((m) => query.emit(m));
+      return false;
+    },
+  });
+  const engine = new ClaudeEngine({ sdk });
+  const thread = await engine.startThread({ cwd: "/tmp" });
+  const events: AgentEvent[] = [];
+  thread.subscribe((event) => events.push(event));
+  const turn = thread.run("Long task");
+  const own = collect(turn);
+  await until(() => queries[0].inputs.length === 1);
+  await turn.steer("Also this");
+  await until(() => queries[0].inputs.length === 2);
+  await turn.interrupt();
+  const result = await turn.result;
+  assert.equal(result.status, "interrupted");
+  const warning = events.find((event) => event.type === "notice");
+  assert.equal(warning?.type === "notice" && warning.kind, "warning");
+  assert.equal(warning?.turnId, result.turnId);
+  assert.match(warning?.type === "notice" ? warning.message : "", /kept a steer .* will run it as a new turn/);
+  // The turn's own events carry the warning too, before the turn ends.
+  const ownTypes = (await own).map((event) => event.type);
+  assert.ok(ownTypes.includes("notice"));
+  assert.ok(ownTypes.indexOf("notice") < ownTypes.indexOf("turn.completed"));
+  await until(() => events.some((event) => event.type === "turn.completed" && event.turnId !== result.turnId));
+  const next = events.find((event) => event.type === "turn.completed" && event.turnId !== result.turnId);
+  assert.equal(next?.type === "turn.completed" && next.status, "completed");
+  assert.equal(next?.type === "turn.completed" && next.text, "Did the steer");
+  await engine.close();
+});
+
+test("an interrupt Claude ignored because it had not read the prompt yet is sent again once the turn runs", async () => {
+  let interrupts = 0;
+  const { sdk, queries } = fakeClaudeSdk({
+    // The first interrupt beats the prompt in, so nothing stops; the second lands on the running turn.
+    onInterrupt: (query) => {
+      interrupts++;
+      if (interrupts === 1) return { still_queued: [] };
+      query.emit({ type: "result", subtype: "error_during_execution", is_error: true, errors: ["aborted"], modelUsage: {} });
+      // The steer is only listed once the prompt is in.
+      return { still_queued: [query.inputs[1]!.uuid as string] };
+    },
+    onCancel: () => true,
+  });
+  const engine = new ClaudeEngine({ sdk });
+  const thread = await engine.startThread({ cwd: "/tmp" });
+  const turn = thread.run("Stop me");
+  await until(() => queries[0].inputs.length === 1);
+  await turn.steer("And this");
+  await until(() => queries[0].inputs.length === 2);
+  await turn.interrupt();
+  assert.equal(interrupts, 1);
+  queries[0].emit({ type: "stream_event", parent_tool_use_id: null, event: { type: "message_start", message: { id: "m" } } });
+  const result = await turn.result;
+  assert.equal(result.status, "interrupted");
+  assert.equal(interrupts, 2);
+  await until(() => queries[0].calls.some((call) => call.method === "cancelAsyncMessage"));
+  assert.deepEqual(queries[0].calls.filter((call) => call.method === "cancelAsyncMessage").map((call) => call.args[0]), [queries[0].inputs[1].uuid]);
+  // A later turn starts clean: its first output sends no interrupt.
+  const next = thread.run("Hi");
+  await until(() => queries[0].inputs.length === 3);
+  replyMessages("Hello", "msg_2").forEach((m) => queries[0].emit(m));
+  assert.equal((await next.result).status, "completed");
+  assert.equal(interrupts, 2);
+  await engine.close();
+});
+
+test("an interrupt before Claude starts the prompt takes the prompt back and ends the turn", async () => {
+  const { sdk, queries } = fakeClaudeSdk({
+    onInterrupt: (query) => ({ still_queued: [query.inputs[0]!.uuid as string] }),
+    onCancel: () => true,
+  });
+  const engine = new ClaudeEngine({ sdk });
+  const thread = await engine.startThread({ cwd: "/tmp" });
+  const turn = thread.run("Never mind");
+  await until(() => queries[0].inputs.length === 1);
+  await turn.interrupt();
+  const result = await turn.result;
+  assert.equal(result.status, "interrupted");
+  assert.equal(result.turnId, queries[0].inputs[0].uuid);
+  await engine.close();
+});
+
+test("a prompt Claude neither gives back nor starts ends the turn after the grace period, and is stopped if it runs late", async () => {
+  const { sdk, queries } = fakeClaudeSdk({
+    // Held behind start-up work: listed, not cancellable, and no output follows.
+    onInterrupt: (query) => ({ still_queued: [query.inputs[0]!.uuid as string] }),
+    onCancel: () => false,
+  });
+  const engine = new ClaudeEngine({ sdk, interruptGraceMs: 20 });
+  const thread = await engine.startThread({ cwd: "/tmp" });
+  const events: AgentEvent[] = [];
+  thread.subscribe((event) => events.push(event));
+  const turn = thread.run("Never mind");
+  await until(() => queries[0].inputs.length === 1);
+  await turn.interrupt();
+  const result = await turn.result;
+  assert.equal(result.status, "interrupted");
+  const interrupts = () => queries[0].calls.filter((call) => call.method === "interrupt").length;
+  assert.equal(interrupts(), 1);
+
+  // It runs after all: the turn it starts is stopped at once and ends as interrupted.
+  replyMessages("Late reply", "msg_late").forEach((m) => queries[0].emit(m));
+  await until(() => events.some((event) => event.type === "turn.completed" && event.turnId !== result.turnId));
+  const late = events.find((event) => event.type === "turn.completed" && event.turnId !== result.turnId);
+  assert.equal(late?.type === "turn.completed" && late.status, "interrupted");
+  assert.equal(interrupts(), 2);
+
+  // The next prompt is not stopped.
+  const next = thread.run("Hi");
+  await until(() => queries[0].inputs.length === 2);
+  replyMessages("Hello", "msg_2").forEach((m) => queries[0].emit(m));
+  assert.equal((await next.result).status, "completed");
+  assert.equal(interrupts(), 2);
+  await engine.close();
+});
+
+test("a prompt Claude would not give back but then starts is interrupted when it runs, not given up on", async () => {
+  const { sdk, queries } = fakeClaudeSdk({
+    onInterrupt: (query) => {
+      const running = queries[0]!.calls.filter((call) => call.method === "interrupt").length > 1;
+      if (running) query.emit({ type: "result", subtype: "error_during_execution", is_error: true, errors: ["aborted"], modelUsage: {} });
+      return { still_queued: running ? [] : [query.inputs[0]!.uuid as string] };
+    },
+    onCancel: () => false,
+  });
+  const engine = new ClaudeEngine({ sdk, interruptGraceMs: 60_000 });
+  const thread = await engine.startThread({ cwd: "/tmp" });
+  const turn = thread.run("Stop me");
+  await until(() => queries[0].inputs.length === 1);
+  await turn.interrupt();
+  queries[0].emit({ type: "stream_event", parent_tool_use_id: null, event: { type: "message_start", message: { id: "m" } } });
+  const result = await turn.result;
+  assert.equal(result.status, "interrupted");
+  assert.equal(queries[0].calls.filter((call) => call.method === "interrupt").length, 2);
+  await engine.close();
+});
+
 test("compact sends /compact and reports the compaction", async () => {
   const { sdk, queries } = fakeClaudeSdk({
     onUser: (_message, query) => {

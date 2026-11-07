@@ -11,6 +11,8 @@
 import type {
   AgentEvent,
   AgentRequest,
+  ApprovalDecision,
+  ApprovalRule,
   FileChange,
   Goal,
   MessagePhase,
@@ -19,9 +21,11 @@ import type {
   RuntimeStatus,
   TokenUsage,
   ToolCall,
+  ToolMedia,
   TurnError,
 } from "../types.ts";
 import { wholeFileDiff } from "../diff.ts";
+import { AgentEngineError } from "../errors.ts";
 
 type Json = Record<string, any>;
 
@@ -138,7 +142,7 @@ export function codexTool(item: Json): ToolCall | undefined {
 }
 
 /** Output and failure of a completed tool item. */
-function toolOutcome(item: Json): { output?: string; isError: boolean } {
+function toolOutcome(item: Json): { output?: string; media?: ToolMedia[]; isError: boolean } {
   switch (item.type) {
     case "commandExecution":
       return {
@@ -150,10 +154,13 @@ function toolOutcome(item: Json): { output?: string; isError: boolean } {
       return { ...(output ? { output } : {}), isError: Boolean(item.error) || item.status === "failed" };
     }
     case "dynamicToolCall": {
-      const text = Array.isArray(item.contentItems)
-        ? item.contentItems.map((part: Json) => part?.text ?? "").filter(Boolean).join("\n")
-        : "";
-      return { ...(text ? { output: text } : {}), isError: item.success === false || item.status === "failed" };
+      const parts: Json[] = Array.isArray(item.contentItems) ? item.contentItems : [];
+      const text = parts.map((part) => part?.text ?? "").filter(Boolean).join("\n");
+      const media = parts.flatMap((part): ToolMedia[] =>
+        part?.type === "inputImage" && typeof part.imageUrl === "string" ? [{ type: "image", url: part.imageUrl }]
+        : part?.type === "inputAudio" && typeof part.audioUrl === "string" ? [{ type: "audio", url: part.audioUrl }]
+        : []);
+      return { ...(text ? { output: text } : {}), ...(media.length ? { media } : {}), isError: item.success === false || item.status === "failed" };
     }
     default:
       return { isError: item.status === "failed" };
@@ -577,6 +584,7 @@ export interface PendingCodexRequest {
 
 const COMMAND_DECISIONS = { allow: "accept", "allow-session": "acceptForSession", deny: "decline", cancel: "cancel" } as const;
 const LEGACY_DECISIONS = { allow: "approved", "allow-session": "approved_for_session", deny: "denied", cancel: "abort" } as const;
+const PLAIN_DECISIONS: Record<string, ApprovalDecision> = { accept: "allow", acceptForSession: "allow-session", decline: "deny", cancel: "cancel" };
 
 /**
  * Wraps one Codex server request as a neutral `AgentRequest`. Returns undefined
@@ -603,17 +611,38 @@ export function codexRequest(
 
   if (method === "item/commandExecution/requestApproval" || method === "item/fileChange/requestApproval") {
     const command = method === "item/commandExecution/requestApproval";
+    const offered = Array.isArray(p.availableDecisions) ? p.availableDecisions as unknown[] : undefined;
+    const decisions = offered?.flatMap((entry) => {
+      const plain = PLAIN_DECISIONS[String(entry)];
+      return plain ? [plain] : [];
+    });
+    const rules = command ? approvalRules(p, offered) : [];
+    const network = record(p.networkApprovalContext);
     const request: AgentRequest = {
       kind: "approval",
       id: requestId,
       action: command ? "command" : "file-change",
-      title: command ? `Run ${p.command ?? "a command"}` : "Change files",
+      title: command ? (network?.host ? `Reach ${network.host}` : `Run ${p.command ?? "a command"}`) : "Change files",
       ...(typeof p.command === "string" ? { command: p.command } : {}),
       ...(typeof p.cwd === "string" ? { cwd: p.cwd } : {}),
       ...(typeof p.reason === "string" ? { reason: p.reason } : {}),
       ...(!command && context.proposedChanges ? { changes: context.proposedChanges } : {}),
+      ...(typeof network?.host === "string" ? { network: { host: network.host, protocol: String(network.protocol ?? "") } } : {}),
+      ...(decisions ? { decisions } : {}),
+      ...(rules.length ? { rules } : {}),
       raw: params,
-      respond: ({ decision }) => answer({ decision: COMMAND_DECISIONS[decision] }),
+      respond: async ({ decision, rule }) => {
+        if (rule) {
+          if (!rules.some((offer) => sameRule(offer, rule))) throw new AgentEngineError("Codex did not offer that rule for this approval; pick one from `rules`.");
+          // A rule that blocks a host goes with a denial; every other rule with an approval.
+          const fits = rule.kind === "network" && rule.action === "deny" ? "deny" : "allow";
+          if (decision !== fits) throw new AgentEngineError(`That rule goes with the decision "${fits}", not "${decision}".`);
+          return answer(rule.kind === "command-prefix"
+            ? { decision: { acceptWithExecpolicyAmendment: { execpolicy_amendment: rule.prefix } } }
+            : { decision: { applyNetworkPolicyAmendment: { network_policy_amendment: { host: rule.host, action: rule.action } } } });
+        }
+        return answer({ decision: COMMAND_DECISIONS[decision] });
+      },
     };
     return { request, response, cancel: () => void answer({ decision: "cancel" }) };
   }
@@ -643,9 +672,13 @@ export function codexRequest(
       ...(typeof p.cwd === "string" ? { cwd: p.cwd } : {}),
       ...(typeof p.reason === "string" ? { reason: p.reason } : {}),
       raw: params,
-      respond: ({ decision }) =>
+      respond: ({ decision, grant, strictReview }) =>
         answer(decision === "allow" || decision === "allow-session"
-          ? { permissions: grantedPermissions(p.permissions), scope: decision === "allow" ? "turn" : "session" }
+          ? {
+            permissions: grantedPermissions(p.permissions, grant),
+            scope: decision === "allow" ? "turn" : "session",
+            ...(strictReview !== undefined ? { strictAutoReview: strictReview } : {}),
+          }
           : { permissions: {}, scope: "turn" }),
     };
     return { request, response, cancel: () => void answer({ permissions: {}, scope: "turn" }) };
@@ -690,9 +723,41 @@ export function codexRequest(
   return undefined;
 }
 
-/** Grants exactly what was requested, dropping nulls the response type does not allow. */
-function grantedPermissions(requested: unknown): Json {
+/**
+ * Grants what was requested, or only the parts `grant` names, dropping nulls
+ * the response type does not allow.
+ */
+function grantedPermissions(requested: unknown, grant?: Record<string, boolean | undefined>): Json {
   const granted: Json = {};
-  for (const [key, value] of Object.entries(record(requested) ?? {})) if (value != null) granted[key] = value;
+  for (const [key, value] of Object.entries(record(requested) ?? {})) {
+    if (value != null && (!grant || grant[key] === true)) granted[key] = value;
+  }
   return granted;
+}
+
+/**
+ * The lasting rules a command approval offers: the ones in its decision list,
+ * or, from a server that sends no list, the ones it proposes.
+ */
+function approvalRules(p: Json, offered: unknown[] | undefined): ApprovalRule[] {
+  const fromList = (offered ?? []).flatMap((entry): ApprovalRule[] => {
+    const decision = record(entry);
+    const prefix = record(decision?.acceptWithExecpolicyAmendment)?.execpolicy_amendment;
+    if (Array.isArray(prefix)) return [{ kind: "command-prefix", prefix: prefix.map(String) }];
+    const network = record(record(decision?.applyNetworkPolicyAmendment)?.network_policy_amendment);
+    if (network && typeof network.host === "string") return [{ kind: "network", host: network.host, action: network.action === "deny" ? "deny" : "allow" }];
+    return [];
+  });
+  if (offered) return fromList;
+  const proposed: ApprovalRule[] = [];
+  if (Array.isArray(p.proposedExecpolicyAmendment)) proposed.push({ kind: "command-prefix", prefix: p.proposedExecpolicyAmendment.map(String) });
+  for (const amendment of Array.isArray(p.proposedNetworkPolicyAmendments) ? p.proposedNetworkPolicyAmendments : []) {
+    if (typeof amendment?.host === "string") proposed.push({ kind: "network", host: amendment.host, action: amendment.action === "deny" ? "deny" : "allow" });
+  }
+  return proposed;
+}
+
+function sameRule(a: ApprovalRule, b: ApprovalRule): boolean {
+  if (a.kind === "command-prefix" && b.kind === "command-prefix") return a.prefix.length === b.prefix.length && a.prefix.every((part, index) => part === b.prefix[index]);
+  return a.kind === "network" && b.kind === "network" && a.host === b.host && a.action === b.action;
 }

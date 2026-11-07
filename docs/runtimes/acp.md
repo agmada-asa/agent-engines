@@ -17,6 +17,7 @@ What it can do comes from the agent's `initialize` answer, so `capabilities()` d
 - **No steering.** ACP has no steering, so `steer` throws `SteerRejectedError`. There is also no compaction, rewind or structured output.
 - **Permissions.** Requests surface as `request` events. `access: "full"` allows each one once without asking, `read-only` refuses, and `accept-edits` allows edits and asks about the rest. ACP has no `auto` level.
 - **Model and effort.** `model` and `effort` set the session's `model` and `thought_level` options. `fastMode` is ignored.
+- **Session settings.** `thread.settings()` lists every option the agent offers, choices and on/off toggles, and `setSetting(id, value)` changes one. A change the agent makes itself arrives as `settings.updated`.
 - **Resuming** loads the session, which replays its history into `history()`.
 - **Probing.** `models()` and `commands()` open a session in a temporary folder when no thread is open, and the agent may keep it in its own list.
 - **Files and terminals** stay with the agent. The engine doesn't offer the client file system or terminal.

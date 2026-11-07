@@ -23,5 +23,6 @@ ACP's answers depend on the agent, because they come from its `initialize` reply
 | Turn limits | No | Yes | No |
 | Fast mode | Yes | Yes, on models that offer it | No |
 | Realtime voice | Yes | No | No |
+| Session settings (`settings()`) | No | No | Yes |
 
 For how Codex restores files on a rewind, see [How files come back](/guide/threads#how-files-come-back). The full set of flags is the `Capabilities` type.

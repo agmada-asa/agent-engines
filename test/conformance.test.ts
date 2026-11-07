@@ -80,6 +80,8 @@ const probes: Probe[] = [
   { name: "plugins.reload", claimed: (c) => c.plugins.reload, use: (_engine, thread) => thread.reloadPlugins() },
   { name: "config", claimed: (c) => c.config, use: (engine) => engine.config({ cwd: CWD }) },
   { name: "realtime", claimed: (c) => c.realtime, use: (_engine, thread) => thread.realtime() },
+  { name: "settings", claimed: (c) => c.settings, use: (_engine, thread) => thread.settings() },
+  { name: "setSetting", claimed: (c) => c.settings, use: (_engine, thread) => thread.setSetting("model", "x") },
 ];
 
 /** Whether a call, sync or async, failed because the feature is unsupported. Other failures do not count. */

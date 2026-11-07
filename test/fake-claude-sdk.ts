@@ -64,7 +64,12 @@ export class FakeQuery {
 
   async interrupt() {
     this.calls.push({ method: "interrupt", args: [] });
-    this.script.onInterrupt?.(this);
+    return this.script.onInterrupt?.(this) ?? undefined;
+  }
+
+  async cancelAsyncMessage(uuid: string) {
+    this.calls.push({ method: "cancelAsyncMessage", args: [uuid] });
+    return this.script.onCancel?.(uuid, this) ?? false;
   }
 
   async setModel(model?: string) {
@@ -176,7 +181,10 @@ export interface FakeClaudeScript {
   usage?: Message;
   /** Runs for each user message the engine sends. */
   onUser?: (message: Message, query: FakeQuery) => void | Promise<void>;
-  onInterrupt?: (query: FakeQuery) => void;
+  /** Runs on `interrupt`; what it returns is the interrupt receipt. */
+  onInterrupt?: (query: FakeQuery) => void | { still_queued: string[] };
+  /** Answers `cancelAsyncMessage`; the default is false, as for a message that already ran. */
+  onCancel?: (uuid: string, query: FakeQuery) => boolean;
   /** What `getSessionMessages` returns; defaults to a short session with a subagent message. */
   sessionMessages?: Message[];
   /** What `rewindFiles` returns. */

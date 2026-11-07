@@ -224,6 +224,41 @@ test("thread options: limits, agents, folders, fallbacks, suggestions, title and
   await engine.close();
 });
 
+test("a subagent's own settings reach the SDK, one agent at a time", async () => {
+  const { sdk, queries } = fakeClaudeSdk();
+  const engine = new ClaudeEngine({ sdk });
+  await engine.startThread({
+    cwd: "/tmp",
+    agents: {
+      researcher: {
+        description: "Digs in", prompt: "Search widely.", model: "haiku", effort: "low", disallowedTools: ["Bash"],
+        claude: {
+          mcpServers: ["notes", { docs: { command: "/usr/bin/docs-mcp" } }],
+          skills: ["search"], maxTurns: 12, background: true, omitClaudeMd: true, memory: "project",
+          permissionMode: "dontAsk", autoCompactWindow: 60_000, observer: "auditor", observerMessage: "Flag writes.",
+          extra: { criticalSystemReminder_EXPERIMENTAL: "Cite sources." },
+        },
+      },
+      plain: { description: "Default", prompt: "Help." },
+    },
+  });
+  assert.deepEqual(queries[0]!.options.agents, {
+    researcher: {
+      description: "Digs in", prompt: "Search widely.", model: "haiku", effort: "low", disallowedTools: ["Bash"],
+      mcpServers: ["notes", { docs: { type: "stdio", command: "/usr/bin/docs-mcp", args: [] } }],
+      skills: ["search"], maxTurns: 12, background: true, omitClaudeMd: true, memory: "project",
+      permissionMode: "dontAsk", autoCompactWindow: 60_000, observer: "auditor", observerMessage: "Flag writes.",
+      criticalSystemReminder_EXPERIMENTAL: "Cite sources.",
+    },
+    plain: { description: "Default", prompt: "Help." },
+  });
+  await engine.close();
+  await assert.rejects(
+    new ClaudeEngine({ sdk }).startThread({ cwd: "/tmp", agents: { a: { description: "x", prompt: "y", claude: { mcpServers: [{ host: { type: "sdk", name: "host", instance: {} } }] } } } }),
+    /in-process MCP server host/u,
+  );
+});
+
 test("subagent progress summaries are off unless asked for", async () => {
   const { sdk, queries } = fakeClaudeSdk();
   const engine = new ClaudeEngine({ sdk });

@@ -392,7 +392,7 @@ test("thread options: title, seed, agents and extra folders reach Codex", async 
     cwd: "/work",
     title: "Handoff",
     additionalDirectories: ["/data"],
-    agents: { reviewer: { description: "Reviews diffs", prompt: "Review carefully.", model: "gpt-6-sol" } },
+    agents: { reviewer: { description: "Reviews diffs", prompt: "Review carefully.", model: "gpt-6-sol", effort: "high", disallowedTools: ["Bash"], claude: { maxTurns: 3 } } },
     seed: { provider: "claude", threadId: "s1", turns: [{ id: "1", status: "completed", entries: [{ kind: "message", role: "user", text: "Hi" }, { kind: "message", role: "assistant", text: "Hello" }] }] },
   });
   const server = children[0]!;
@@ -400,7 +400,8 @@ test("thread options: title, seed, agents and extra folders reach Codex", async 
   assert.deepEqual(start.config.sandbox_workspace_write, { writable_roots: ["/data"] });
   const role = start.config.agents.reviewer;
   assert.equal(role.description, "Reviews diffs");
-  assert.equal(await readFile(role.config_file, "utf8"), 'model = "gpt-6-sol"\ndeveloper_instructions = "Review carefully."\n');
+  // Claude-only fields are left out.
+  assert.equal(await readFile(role.config_file, "utf8"), 'model = "gpt-6-sol"\nmodel_reasoning_effort = "high"\ndeveloper_instructions = "Review carefully."\n');
   assert.deepEqual(server.requests("thread/name/set"), [{ threadId: THREAD, name: "Handoff" }]);
   assert.deepEqual(server.requests("thread/inject_items")[0].items, [
     { type: "message", role: "user", content: [{ type: "input_text", text: "Hi" }] },

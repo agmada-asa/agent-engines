@@ -176,6 +176,60 @@ test("startThread with a model and effort sends session/set_config_option for ea
   await engine.close();
 });
 
+test("settings lists the agent's options, toggles included, and setSetting changes one by ID", async () => {
+  const { engine, agent } = engineWith({
+    "session/new": (_params, server) => {
+      const opened = server.openSession();
+      opened.configOptions.push(
+        { id: "web", name: "Web access", description: "Let it browse", category: "_tools", type: "boolean", currentValue: false },
+        { id: "style", name: "Style", type: "select", currentValue: "terse", options: [{ group: "plain", name: "Plain", options: [{ value: "terse", name: "Terse" }, { value: "chatty", name: "Chatty" }] }] },
+        { id: "future", name: "Some later kind", type: "slider", currentValue: 3 },
+      );
+      return opened;
+    },
+  });
+  const thread = await engine.startThread({ cwd: CWD });
+  assert.deepEqual((agent().requests("initialize")[0] as any).clientCapabilities.session.configOptions, { boolean: {} });
+  const settings = await thread.settings();
+  // A kind of option this client does not know is left out.
+  assert.deepEqual(settings.map((setting) => setting.id), ["model", "thought_level", "web", "style"]);
+  assert.deepEqual(settings[2], { id: "web", name: "Web access", description: "Let it browse", category: "_tools", type: "boolean", value: false });
+  assert.deepEqual(settings[3], {
+    id: "style", name: "Style", type: "select", value: "terse",
+    options: [{ value: "terse", name: "Terse", group: "Plain" }, { value: "chatty", name: "Chatty", group: "Plain" }],
+  });
+
+  const after = await thread.setSetting("web", true);
+  assert.deepEqual(agent().requests("session/set_config_option"), [{ sessionId: "sess-1", configId: "web", type: "boolean", value: true }]);
+  assert.equal(after.find((setting) => setting.id === "web")?.value, true);
+  await thread.setSetting("style", "chatty");
+  assert.deepEqual(agent().requests("session/set_config_option")[1], { sessionId: "sess-1", configId: "style", value: "chatty" });
+
+  await assert.rejects(thread.setSetting("web", "yes"), /on or off/u);
+  await assert.rejects(thread.setSetting("style", "loud"), /does not offer loud/u);
+  await assert.rejects(thread.setSetting("nope", true), /no setting nope/u);
+  assert.equal(agent().requests("session/set_config_option").length, 2);
+  await engine.close();
+});
+
+test("a settings change the agent makes reaches subscribers as settings.updated", async () => {
+  const { engine } = engineWith({
+    "session/prompt": (params, server) => {
+      const options = server.session(params.sessionId).configOptions;
+      options[0]!.currentValue = "model-b";
+      server.update(params.sessionId, { sessionUpdate: "config_option_update", configOptions: options });
+      return { stopReason: "end_turn" };
+    },
+  });
+  const thread = await engine.startThread({ cwd: CWD });
+  const events = await drain(thread.run("Switch models"));
+  const updated = ofType(events, "settings.updated");
+  assert.equal(updated.length, 1);
+  assert.equal(updated[0]!.settings.find((setting) => setting.id === "model")?.value, "model-b");
+  assert.equal((await thread.settings())[0]!.value, "model-b");
+  await engine.close();
+});
+
 test("startThread fails on a model the agent does not offer, and sets nothing", async () => {
   const { engine, agent } = engineWith();
   await assert.rejects(engine.startThread({ cwd: CWD, model: "model-z" }), /does not offer model model-z/u);

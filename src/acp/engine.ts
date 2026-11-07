@@ -55,6 +55,7 @@ import type {
   ThreadHistory,
   ThreadMode,
   ThreadOptions,
+  ThreadSetting,
   ThreadSummary,
   TranscriptEntry,
   Turn,
@@ -64,7 +65,7 @@ import type {
   UsageReport,
 } from "../types.ts";
 import { ACP_PROTOCOL_VERSION, AcpClient, AcpRpcError, type SpawnAcpProcess } from "./client.ts";
-import { AcpNormalizer, namesNoOperation } from "./normalize.ts";
+import { AcpNormalizer, acpSettings, namesNoOperation } from "./normalize.ts";
 
 type Json = Record<string, any>;
 
@@ -222,6 +223,7 @@ export class AcpEngine implements Engine {
       plugins: { list: false, install: false, reload: false },
       config: false,
       realtime: false,
+      settings: true,
       promptSuggestions: false,
       liveOutput: { commandOutput: false, diff: false, planProposal: false },
     };
@@ -442,7 +444,12 @@ export class AcpEngine implements Engine {
     try {
       init = await client.request<AcpInit>("initialize", {
         protocolVersion: ACP_PROTOCOL_VERSION,
-        clientCapabilities: { fs: { readTextFile: false, writeTextFile: false }, terminal: false, elicitation: { form: {}, url: {} }, session: { notices: {} } },
+        clientCapabilities: {
+          fs: { readTextFile: false, writeTextFile: false },
+          terminal: false,
+          elicitation: { form: {}, url: {} },
+          session: { notices: {}, configOptions: { boolean: {} } },
+        },
         clientInfo: { name: this.options.clientName ?? "agent-engines", version: "0.4.0" },
       });
     } catch (error) {
@@ -847,6 +854,29 @@ class AcpThread implements Thread {
 
   async realtime(): Promise<RealtimeSession> {
     throw new UnsupportedFeatureError("open a realtime voice session", this.engine.name);
+  }
+
+  async settings(): Promise<ThreadSetting[]> {
+    await this.ready();
+    return acpSettings(this.normalizer.configOptions);
+  }
+
+  async setSetting(id: string, value: string | boolean): Promise<ThreadSetting[]> {
+    const client = await this.ready();
+    const option = this.normalizer.configOptions.find((entry) => entry?.id === id);
+    const setting = option && acpSettings([option])[0];
+    if (!setting) throw new AgentEngineError(`${this.engine.name} has no setting ${id}.`);
+    if (setting.type === "boolean" && typeof value !== "boolean") throw new AgentEngineError(`${setting.name} is on or off; pass true or false.`);
+    if (setting.type === "select" && (typeof value !== "string" || !setting.options.some((entry) => entry.value === value))) {
+      throw new AgentEngineError(`${this.engine.name} does not offer ${String(value)} for ${setting.name}.`);
+    }
+    if (setting.value !== value) {
+      const response = await client.request<Json>("session/set_config_option", {
+        sessionId: this.id, configId: id, ...(setting.type === "boolean" ? { type: "boolean" } : {}), value,
+      });
+      if (Array.isArray(response?.configOptions)) this.normalizer.configOptions = response.configOptions;
+    }
+    return acpSettings(this.normalizer.configOptions);
   }
 
   async close(): Promise<void> {

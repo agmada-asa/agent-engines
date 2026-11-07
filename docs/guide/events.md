@@ -14,7 +14,7 @@ A turn is an async iterable of `AgentEvent`s. `thread.subscribe()` sees every ev
 | Background work | `status`, `task.started`, `task.progress`, `task.ended`, `subagent.started`, `subagent.ended` |
 | Requests | `request`, `request.resolved` |
 | Usage and models | `usage`, `rate-limit`, `compacted`, `model.rerouted`, `model.confirmed`, `service-tier.updated` |
-| Runtime | `notice`, `hook.started`, `hook.completed`, `goal.updated`, `mcp.status`, `thread.renamed`, `prompt.suggestion`, `realtime.*` |
+| Runtime | `notice`, `hook.started`, `hook.completed`, `goal.updated`, `mcp.status`, `thread.renamed`, `settings.updated`, `prompt.suggestion`, `realtime.*` |
 
 `engine.subscribe()` gets the events that belong to no thread: `account.changed` and `notice` (a config warning, a deprecation). Only Codex sends these today. Claude and ACP engines accept a listener, but it never fires.
 
@@ -27,6 +27,13 @@ Events from a subagent carry its `agentId`.
 A `request` is an approval, a question (Claude's AskUserQuestion, Codex's user-input request, an ACP agent's multiple-choice question) or an MCP elicitation. Call its `respond` once. An unanswered request is cancelled when the turn ends.
 
 A Codex file-change approval carries the proposed `changes`, with diffs, so the user can review them before allowing.
+
+Codex approvals can carry more:
+
+- `decisions` lists the plain answers Codex offers for this request. When it's missing, all four are fine.
+- `network` names the host when the command needs network access.
+- `rules` are lasting rules Codex offers to save: allow later commands that start with a prefix, or allow or block a host. Answer with one of them as `rule`: `{ decision: "allow", rule }`, or `{ decision: "deny", rule }` for a rule that blocks a host. A rule Codex didn't offer, or with the other decision, is refused.
+- A `permissions` request can be granted in part: `{ decision: "allow", grant: { network: true } }` grants the network and refuses the file-system access. `strictReview: true` has Codex review every later command in the turn.
 
 ## File changes
 
