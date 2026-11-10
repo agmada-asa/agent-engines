@@ -90,7 +90,11 @@ export function classifyCodexError(error: Json | undefined | null, limits: reado
     case "rateLimitExceeded":
       return { kind: "rate-limit", message, ...(resetsAt ? { resetsAt } : {}) };
     case "serverOverloaded":
+    case "policyCapacityUnavailable": // Codex 0.167+
+    case "flexUnavailable": // the flex service tier has no capacity just now
       return { kind: "rate-limit", message };
+    case "modelNotFound": // Codex 0.167+
+      return { kind: "model", message };
     case "contextWindowExceeded":
       return { kind: "context-window", message };
     case "unauthorized":
