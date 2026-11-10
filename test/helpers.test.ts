@@ -270,6 +270,23 @@ test("renderTranscript cuts tool output over 2000 characters and marks failed ca
   assert.equal(kept, `[tool Read] {}\n${exact}`);
 });
 
+test("renderTranscript cuts a tool's input over 2000 characters, so a seed doesn't carry every file a turn wrote", () => {
+  const file = "x".repeat(200_000);
+  const write = (path: string) => ({ kind: "tool" as const, tool: { kind: "builtin" as const, name: "Write", input: { file_path: path, content: file } }, output: "ok" });
+  const seeded = transcript([{ id: "t1", status: "completed", entries: Array.from({ length: 10 }, (_, index) => write(`/tmp/file-${index}.txt`)) }]);
+  const text = renderTranscript(seeded);
+  assert.ok(text.length < 10 * 2_200, `rendered ${text.length} characters`);
+  // The start of the input, where a path is, is what's kept.
+  assert.match(text, /\[tool Write\] \{"file_path":"\/tmp\/file-0\.txt","content":"x+…\nok/);
+  assert.ok(JSON.stringify(responsesItems(seeded)).length < 10 * 2_400);
+  assert.ok(seedPreamble(seeded).length < 10 * 2_300);
+  // A string input is cut the same way, and one at the limit is kept whole.
+  const long = renderTranscript(transcript([{ id: "t1", status: "completed", entries: [{ kind: "tool", tool: { kind: "builtin", name: "Bash", input: "y".repeat(2_001) } }] }]));
+  assert.equal(long, `[tool Bash] ${"y".repeat(2_000)}…`);
+  const exact = renderTranscript(transcript([{ id: "t1", status: "completed", entries: [{ kind: "tool", tool: { kind: "builtin", name: "Bash", input: "y".repeat(2_000) } }] }]));
+  assert.equal(exact, `[tool Bash] ${"y".repeat(2_000)}`);
+});
+
 test("renderTranscript of a transcript with only reasoning is empty", () => {
   assert.equal(renderTranscript(transcript([{ id: "t1", status: "completed", entries: [{ kind: "reasoning", text: "thinking" }] }])), "");
 });

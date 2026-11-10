@@ -78,4 +78,4 @@ const transcript = await claudeThread.export();
 const codexThread = await codex.startThread({ cwd, seed: transcript });
 ```
 
-Codex adds the earlier conversation to the thread's history. Claude and ACP agents get it before the first message. Reasoning is left out and long tool output is shortened.
+Codex adds the earlier conversation to the thread's history. Claude and ACP agents get it before the first message. Reasoning is left out, and a tool call's input and output are each shortened to their first 2,000 characters, so a turn that wrote large files doesn't make the seed larger than the next runtime can take.

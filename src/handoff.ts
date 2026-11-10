@@ -10,14 +10,23 @@ import type { PortableTranscript, TranscriptEntry } from "./types.ts";
 /** Longest tool output kept per call in a rendering, so a seed stays a sensible size. */
 const MAX_TOOL_OUTPUT = 2_000;
 
+/**
+ * Longest tool input kept per call. A write's input is the whole file, so uncut inputs can make a
+ * seed larger than the next runtime's context window or its request size limit.
+ */
+const MAX_TOOL_INPUT = 2_000;
+
+/** Text cut to `most` characters, with an ellipsis where it was cut. */
+const cut = (text: string, most: number) => (text.length > most ? `${text.slice(0, most)}…` : text);
+
 /** One entry as plain text, or undefined for entries a reader does not need. */
 function renderEntry(entry: TranscriptEntry): string | undefined {
   switch (entry.kind) {
     case "message":
       return `${entry.role === "user" ? "User" : "Assistant"}: ${entry.text}`;
     case "tool": {
-      const input = typeof entry.tool.input === "string" ? entry.tool.input : JSON.stringify(entry.tool.input ?? {});
-      const output = entry.output ? `\n${entry.output.length > MAX_TOOL_OUTPUT ? `${entry.output.slice(0, MAX_TOOL_OUTPUT)}…` : entry.output}` : "";
+      const input = cut(typeof entry.tool.input === "string" ? entry.tool.input : JSON.stringify(entry.tool.input ?? {}), MAX_TOOL_INPUT);
+      const output = entry.output ? `\n${cut(entry.output, MAX_TOOL_OUTPUT)}` : "";
       return `[tool ${entry.tool.name}${entry.isError ? " failed" : ""}] ${input}${output}`;
     }
     case "files":
