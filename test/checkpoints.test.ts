@@ -144,6 +144,29 @@ test("reverseChanges undoes adds, deletes, updates and moves, newest first, and 
   assert.deepEqual(result.paths, [added, deleted, moved, updated].sort());
 });
 
+test("a restore finishes when the turn made a repository of its own inside the folder, and leaves that repository", async () => {
+  const dir = await repository();
+  const tree = await snapshotTree(dir);
+  // During the turn: an edit, a new file, and a cloned or newly made repository, which git records as one entry.
+  await writeFile(join(dir, "tracked.txt"), "one\nTWO\n");
+  await writeFile(join(dir, "new.txt"), "made by the agent\n");
+  await mkdir(join(dir, "vendor"));
+  const nested = (...args: string[]) => execFileSync("git", args, { cwd: join(dir, "vendor"), stdio: "ignore" });
+  nested("init", "-q");
+  nested("config", "user.email", "test@example.com");
+  nested("config", "user.name", "Test");
+  await writeFile(join(dir, "vendor", "lib.txt"), "theirs\n");
+  nested("add", ".");
+  nested("commit", "-qm", "vendored");
+
+  const restored = await restoreTree(dir, tree);
+  assert.equal(await readFile(join(dir, "tracked.txt"), "utf8"), "one\ntwo\n");
+  assert.equal(await exists(join(dir, "new.txt")), false);
+  assert.equal(await readFile(join(dir, "vendor", "lib.txt"), "utf8"), "theirs\n", "a whole repository is not deleted as if it were a file");
+  assert.deepEqual(restored.paths, [join(dir, "new.txt"), join(dir, "tracked.txt")]);
+  assert.deepEqual(restored.skipped, [join(dir, "vendor")]);
+});
+
 test("reverseChanges leaves alone a file the user changed after the turn added or deleted it", async () => {
   const dir = await folder("edits-drift");
   const rewritten = join(dir, "notes.md");

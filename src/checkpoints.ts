@@ -71,9 +71,10 @@ export async function snapshotTree(cwd: string): Promise<string> {
  * Puts the files under `cwd` back as they were in snapshot `tree`: changed and
  * deleted files are restored, files added since are removed. Only what differs
  * is touched, but that includes anyone's changes in the folder since the
- * snapshot, not only the agent's.
+ * snapshot, not only the agent's. `skipped` lists added paths that could not
+ * be removed and were left in place, such as a repository cloned into the folder.
  */
-export async function restoreTree(cwd: string, tree: string): Promise<{ paths: string[]; insertions: number; deletions: number }> {
+export async function restoreTree(cwd: string, tree: string): Promise<{ paths: string[]; insertions: number; deletions: number; skipped?: string[] }> {
   const repository = await gitRepository(cwd);
   if (!repository) throw new AgentEngineError(`${cwd} is not in a git repository.`);
   const now = await snapshotTree(cwd);
@@ -96,8 +97,16 @@ export async function restoreTree(cwd: string, tree: string): Promise<{ paths: s
   for (let start = 0; start < restore.length; start += 500) {
     await git(repository.top, ["restore", `--source=${tree}`, "--worktree", "--", ...restore.slice(start, start + 500)]);
   }
-  for (const path of remove) await rm(join(repository.top, path), { force: true });
-  return { paths: [...restore, ...remove].map((path) => join(cwd, path.slice(prefix.length))).sort(), insertions, deletions };
+  // One path that can't be removed must not stop the rest, which have already been put back. A
+  // repository made inside the folder since the snapshot shows here as a single entry that is a
+  // directory: it is left where it is, since removing it would delete a whole checkout.
+  const removed: string[] = [];
+  const left: string[] = [];
+  for (const path of remove) {
+    await rm(join(repository.top, path), { force: true }).then(() => removed.push(path), () => left.push(path));
+  }
+  const absolute = (paths: string[]) => paths.map((path) => join(cwd, path.slice(prefix.length))).sort();
+  return { paths: absolute([...restore, ...removed]), insertions, deletions, ...(left.length ? { skipped: absolute(left) } : {}) };
 }
 
 /** Snapshot tree IDs by turn for one thread, kept in the repository's git folder so they outlive the process. */
