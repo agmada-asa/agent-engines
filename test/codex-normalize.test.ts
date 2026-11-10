@@ -195,6 +195,9 @@ test("classifyCodexError", () => {
   assert.equal(classifyCodexError({ message: "x", codexErrorInfo: "contextWindowExceeded" }).kind, "context-window");
   assert.equal(classifyCodexError({ message: "x", codexErrorInfo: { httpConnectionFailed: { httpStatusCode: 502 } } }).kind, "connection");
   assert.equal(classifyCodexError({ message: "x", codexErrorInfo: "unauthorized" }).kind, "auth");
+  assert.equal(classifyCodexError({ message: "x", codexErrorInfo: "modelNotFound" }).kind, "model");
+  assert.equal(classifyCodexError({ message: "x", codexErrorInfo: "policyCapacityUnavailable" }).kind, "rate-limit");
+  assert.equal(classifyCodexError({ message: "x", codexErrorInfo: "flexUnavailable" }).kind, "rate-limit");
   assert.equal(classifyCodexError(null).kind, "other");
   assert.deepEqual(codexRateLimits(undefined), []);
 });
