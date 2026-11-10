@@ -144,6 +144,42 @@ test("reverseChanges undoes adds, deletes, updates and moves, newest first, and 
   assert.deepEqual(result.paths, [added, deleted, moved, updated].sort());
 });
 
+test("reverseChanges leaves alone a file the user changed after the turn added or deleted it", async () => {
+  const dir = await folder("edits-drift");
+  const rewritten = join(dir, "notes.md");
+  const recreated = join(dir, "old.txt");
+  const untouched = join(dir, "scratch.txt");
+  const alreadyGone = join(dir, "gone.txt");
+  // The turn added notes.md and scratch.txt and deleted old.txt. Since then the user rewrote
+  // notes.md and made a new old.txt of their own.
+  await writeFile(rewritten, "my own notes, written after the turn\n");
+  await writeFile(recreated, "a new file of mine\n");
+  await writeFile(untouched, "draft\n");
+  const result = await reverseChanges([
+    { path: rewritten, kind: "add", diff: wholeFileDiff("+", "agent draft\n") },
+    { path: recreated, kind: "delete", diff: wholeFileDiff("-", "a\nb\n") },
+    { path: untouched, kind: "add", diff: wholeFileDiff("+", "draft\n") },
+    { path: alreadyGone, kind: "add", diff: wholeFileDiff("+", "x\n") },
+  ]);
+  assert.equal(await readFile(rewritten, "utf8"), "my own notes, written after the turn\n");
+  assert.equal(await readFile(recreated, "utf8"), "a new file of mine\n");
+  assert.equal(await exists(untouched), false);
+  assert.deepEqual(result.skipped, [rewritten, recreated].sort());
+  assert.deepEqual(result.paths, [alreadyGone, untouched].sort());
+});
+
+test("reverseChanges removes a file the turn added and then edited, undoing the edit first", async () => {
+  const dir = await folder("edits-add-then-update");
+  const file = join(dir, "new.txt");
+  await writeFile(file, "one\nTWO\n");
+  const result = await reverseChanges([
+    { path: file, kind: "update", diff: unifiedDiff("one\ntwo\n", "one\nTWO\n") },
+    { path: file, kind: "add", diff: wholeFileDiff("+", "one\ntwo\n") },
+  ]);
+  assert.equal(await exists(file), false);
+  assert.deepEqual(result, { paths: [file], skipped: [] });
+});
+
 /** A fake app-server whose turns the test finishes, with a turn history for rewind. */
 function codexHandlers(history: () => unknown[]) {
   let turns = 0;

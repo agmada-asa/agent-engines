@@ -193,10 +193,20 @@ export function reverseDiff(text: string, diff: string): string | undefined {
   return lines.length ? lines.join("\n") + (trailingNewline || !text ? "\n" : "") : "";
 }
 
+/** The lines a diff adds (`+`) or removes (`-`), across its hunks, in order. */
+function sideOf(diff: string, op: "+" | "-"): string[] {
+  return parseHunks(diff).flatMap((hunk) => hunk.lines.filter((line) => line.op === op).map((line) => line.text));
+}
+
+/** Text without its one final newline, so a file compares equal to a diff's lines whether or not it ends in one. */
+const withoutFinalNewline = (text: string) => (text.endsWith("\n") ? text.slice(0, -1) : text);
+
 /**
  * Undoes file changes, given newest first: an added file is removed, a deleted
  * one written back from its diff, a moved one moved back, an update reversed.
- * Files whose current text no longer matches the change are skipped.
+ * Files whose current text no longer matches the change are skipped: an added
+ * file that has been rewritten since, a deleted one whose path holds something
+ * again, an update whose lines are no longer there.
  */
 export async function reverseChanges(changes: readonly FileChange[]): Promise<{ paths: string[]; skipped: string[] }> {
   const paths = new Set<string>();
@@ -204,9 +214,22 @@ export async function reverseChanges(changes: readonly FileChange[]): Promise<{ 
   for (const change of changes) {
     try {
       if (change.kind === "add") {
-        await rm(change.path, { force: true });
+        const current = await readFile(change.path, "utf8").catch(() => undefined);
+        // Already gone: nothing to undo. Still there but no longer what the turn wrote: the user's now.
+        if (current !== undefined) {
+          if (change.diff !== undefined && withoutFinalNewline(current) !== sideOf(change.diff, "+").join("\n")) {
+            skipped.add(change.path);
+            continue;
+          }
+          await rm(change.path, { force: true });
+        }
       } else if (change.kind === "delete") {
-        const text = parseHunks(change.diff ?? "").flatMap((hunk) => hunk.lines.filter((line) => line.op === "-").map((line) => line.text));
+        // Something has been put at the path since the turn deleted it: writing the old text back would replace it.
+        if (await stat(change.path).then(() => true, () => false)) {
+          skipped.add(change.path);
+          continue;
+        }
+        const text = sideOf(change.diff ?? "", "-");
         await mkdir(dirname(change.path), { recursive: true });
         await writeFile(change.path, text.length ? `${text.join("\n")}\n` : "");
       } else {
