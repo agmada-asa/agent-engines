@@ -19,6 +19,7 @@ import {
   RuntimeCompatibilityError,
   RuntimeConnectionError,
   RuntimeModelSubstitutionError,
+  RuntimeModelUnavailableError,
   SteerRejectedError,
   UnsupportedFeatureError,
 } from "../errors.ts";
@@ -1456,6 +1457,8 @@ class CodexThread implements Thread {
   private async interrupt(turn: TurnHandle): Promise<void> {
     if (turn.done) return;
     const turnId = await turn.id;
+    // The turn can end while its id is awaited, and one that failed to start never had an id: nothing is left to interrupt.
+    if (turn.done || !turnId) return;
     const client = await this.ready();
     await client.request("turn/interrupt", { threadId: this.id, turnId });
   }
@@ -1492,7 +1495,12 @@ class CodexThread implements Thread {
   private failTurn(turn: TurnHandle, error: unknown): void {
     if (turn.done) return;
     const message = error instanceof Error ? error.message : String(error);
-    const kind = error instanceof RuntimeConnectionError ? "connection" : error instanceof RuntimeModelSubstitutionError ? "model" : "other";
+    // The same kinds the Claude engine gives, so an app can offer a sign-in or wait for the connection
+    // whichever runtime the turn failed to start on.
+    const kind = error instanceof RuntimeAuthError ? "auth"
+      : error instanceof RuntimeConnectionError ? "connection"
+      : error instanceof RuntimeModelSubstitutionError || error instanceof RuntimeModelUnavailableError ? "model"
+      : "other";
     const event: AgentEvent = { threadId: this.id, turnId: turn.turnId ?? "", type: "turn.failed", error: { kind, message } };
     turn.push(event);
     emitTo(this.listeners, event);

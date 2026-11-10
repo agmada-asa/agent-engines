@@ -295,7 +295,8 @@ export class CodexClient {
     return new Promise<T>((resolve, reject) => {
       const timer = setTimeout(() => {
         if (!this.pending.delete(id)) return;
-        const error = new AgentEngineError(`Codex app-server request timed out: ${method} (${this.requestTimeoutMs}ms).`);
+        // A connection error: the app-server stopped answering, and the connection is closed below.
+        const error = new RuntimeConnectionError(`Codex app-server request timed out: ${method} (${this.requestTimeoutMs}ms).`);
         reject(error);
         // A runtime that stops answering is unusable; close it rather than leak requests.
         this.shutdown(error);
