@@ -110,6 +110,35 @@ test("reverseDiff takes Codex's diffs, which end in a newline, including a hunk 
   assert.equal(reverseDiff("a\n\nB\n", "@@ -1,3 +1,3 @@\n a\n\n-b\n+B\n"), "a\n\nb\n");
 });
 
+test("reverseDiff gives back the original's final newline, or its absence", () => {
+  for (const [before, after] of [
+    ["a\nb", "a\nB\n"], // the edit added a final newline
+    ["a\nb\n", "a\nB"], // the edit removed it
+    ["a\nb", "a\nB"], // neither side has one
+    ["a\nb\n", "a\nb\nc"], // a line added at the end, without one
+    ["a\nb", "a\nb\nc\n"],
+  ]) {
+    assert.equal(reverseDiff(after!, unifiedDiff(before!, after!)), before, `${JSON.stringify(after)} back to ${JSON.stringify(before)}`);
+  }
+  // Every pair of short random texts, with and without a final newline on either side.
+  let seed = 7;
+  const random = (below: number) => ((seed = (seed * 1103515245 + 12345) % 2 ** 31), seed % below);
+  const text = () => {
+    const lines = Array.from({ length: 1 + random(12) }, () => "abcde"[random(5)]!);
+    return lines.join("\n") + (random(3) ? "\n" : "");
+  };
+  let wrong = 0;
+  let cases = 0;
+  for (let index = 0; index < 400; index += 1) {
+    const before = text();
+    const after = text();
+    if (before === after) continue;
+    cases += 1;
+    if (reverseDiff(after, unifiedDiff(before, after)) !== before) wrong += 1;
+  }
+  assert.equal(wrong, 0, `${wrong} of ${cases} random edits did not reverse exactly`);
+});
+
 test("reverseDiff finds a hunk that moved, and refuses one that no longer matches", () => {
   const diff = unifiedDiff("a\nb\nc\n", "a\nB\nc\n");
   assert.equal(reverseDiff("header\nextra\na\nB\nc\n", diff), "header\nextra\na\nb\nc\n");

@@ -146,12 +146,17 @@ export class CheckpointStore {
 interface Hunk {
   newStart: number;
   lines: Array<{ op: " " | "-" | "+"; text: string }>;
+  /** A no-newline marker followed a line of the old file: the old file did not end in a newline. */
+  oldNoNewline?: boolean;
+  /** The same for the new file. */
+  newNoNewline?: boolean;
 }
 
 /**
  * Parses `@@ -a,b +c,d @@` hunks, reading only as many lines as each header
  * counts, so a diff's trailing newline is not taken for an empty context line.
- * The no-newline marker is skipped.
+ * A no-newline marker is not a line of either file: it is recorded on the hunk
+ * for the side, or sides, of the line it follows.
  */
 function parseHunks(diff: string): Hunk[] {
   const hunks: Hunk[] = [];
@@ -166,6 +171,13 @@ function parseHunks(diff: string): Hunk[] {
       continue;
     }
     const hunk = hunks[hunks.length - 1];
+    if (hunk && line.startsWith("\\")) {
+      // After a removed line it speaks for the old file, after an added one for the new, after context for both.
+      const op = hunk.lines[hunk.lines.length - 1]?.op;
+      if (op === "-" || op === " ") hunk.oldNoNewline = true;
+      if (op === "+" || op === " ") hunk.newNoNewline = true;
+      continue;
+    }
     if (!hunk || line.startsWith("\\") || (oldLeft <= 0 && newLeft <= 0)) continue;
     // Some tools write an empty context line without its leading space.
     const op = line === "" ? " " : line[0];
@@ -184,8 +196,13 @@ function parseHunks(diff: string): Hunk[] {
 export function reverseDiff(text: string, diff: string): string | undefined {
   const trailingNewline = text.endsWith("\n");
   const lines = text === "" ? [] : (trailingNewline ? text.slice(0, -1) : text).split("\n");
+  const hunks = parseHunks(diff);
+  // A marker means the diff reached the end of the file, so it says how the original ended: without
+  // a final newline if the marker was on its side, with one if it was only on the new side.
+  const marked = hunks.some((hunk) => hunk.oldNoNewline || hunk.newNoNewline);
+  const endsWithNewline = marked ? !hunks.some((hunk) => hunk.oldNoNewline) : trailingNewline || !text;
   // Last hunk first, so earlier line numbers stay right.
-  for (const hunk of parseHunks(diff).reverse()) {
+  for (const hunk of hunks.reverse()) {
     const after = hunk.lines.filter((line) => line.op !== "-").map((line) => line.text);
     const before = hunk.lines.filter((line) => line.op !== "+").map((line) => line.text);
     const matches = (at: number) => after.every((line, offset) => lines[at + offset] === line);
@@ -199,7 +216,7 @@ export function reverseDiff(text: string, diff: string): string | undefined {
     if (at < 0) return undefined;
     lines.splice(at, after.length, ...before);
   }
-  return lines.length ? lines.join("\n") + (trailingNewline || !text ? "\n" : "") : "";
+  return lines.length ? lines.join("\n") + (endsWithNewline ? "\n" : "") : "";
 }
 
 /** The lines a diff adds (`+`) or removes (`-`), across its hunks, in order. */
