@@ -202,22 +202,31 @@ test("reverseChanges leaves alone a file the user changed after the turn added o
   const recreated = join(dir, "old.txt");
   const untouched = join(dir, "scratch.txt");
   const alreadyGone = join(dir, "gone.txt");
+  const filledIn = join(dir, "__init__.py");
+  const stillEmpty = join(dir, "empty.txt");
   // The turn added notes.md and scratch.txt and deleted old.txt. Since then the user rewrote
-  // notes.md and made a new old.txt of their own.
+  // notes.md and made a new old.txt of their own. It also added two empty files, which carry no
+  // diff, and the user has since written in one of them.
   await writeFile(rewritten, "my own notes, written after the turn\n");
   await writeFile(recreated, "a new file of mine\n");
   await writeFile(untouched, "draft\n");
+  await writeFile(filledIn, "from .core import run\n");
+  await writeFile(stillEmpty, "");
   const result = await reverseChanges([
     { path: rewritten, kind: "add", diff: wholeFileDiff("+", "agent draft\n") },
     { path: recreated, kind: "delete", diff: wholeFileDiff("-", "a\nb\n") },
     { path: untouched, kind: "add", diff: wholeFileDiff("+", "draft\n") },
     { path: alreadyGone, kind: "add", diff: wholeFileDiff("+", "x\n") },
+    { path: filledIn, kind: "add" },
+    { path: stillEmpty, kind: "add" },
   ]);
   assert.equal(await readFile(rewritten, "utf8"), "my own notes, written after the turn\n");
   assert.equal(await readFile(recreated, "utf8"), "a new file of mine\n");
+  assert.equal(await readFile(filledIn, "utf8"), "from .core import run\n");
   assert.equal(await exists(untouched), false);
-  assert.deepEqual(result.skipped, [rewritten, recreated].sort());
-  assert.deepEqual(result.paths, [alreadyGone, untouched].sort());
+  assert.equal(await exists(stillEmpty), false);
+  assert.deepEqual(result.skipped, [filledIn, rewritten, recreated].sort());
+  assert.deepEqual(result.paths, [alreadyGone, stillEmpty, untouched].sort());
 });
 
 test("reverseChanges removes a file the turn added and then edited, undoing the edit first", async () => {

@@ -243,7 +243,8 @@ export async function reverseChanges(changes: readonly FileChange[]): Promise<{ 
         const current = await readFile(change.path, "utf8").catch(() => undefined);
         // Already gone: nothing to undo. Still there but no longer what the turn wrote: the user's now.
         if (current !== undefined) {
-          if (change.diff !== undefined && withoutFinalNewline(current) !== sideOf(change.diff, "+").join("\n")) {
+          // No diff means the turn wrote an empty file: every normalizer leaves out the diff of one.
+          if (withoutFinalNewline(current) !== sideOf(change.diff ?? "", "+").join("\n")) {
             skipped.add(change.path);
             continue;
           }
