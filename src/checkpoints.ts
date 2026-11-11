@@ -71,9 +71,10 @@ export async function snapshotTree(cwd: string): Promise<string> {
  * Puts the files under `cwd` back as they were in snapshot `tree`: changed and
  * deleted files are restored, files added since are removed. Only what differs
  * is touched, but that includes anyone's changes in the folder since the
- * snapshot, not only the agent's.
+ * snapshot, not only the agent's. `skipped` lists added paths that could not
+ * be removed and were left in place, such as a repository cloned into the folder.
  */
-export async function restoreTree(cwd: string, tree: string): Promise<{ paths: string[]; insertions: number; deletions: number }> {
+export async function restoreTree(cwd: string, tree: string): Promise<{ paths: string[]; insertions: number; deletions: number; skipped?: string[] }> {
   const repository = await gitRepository(cwd);
   if (!repository) throw new AgentEngineError(`${cwd} is not in a git repository.`);
   const now = await snapshotTree(cwd);
@@ -96,8 +97,16 @@ export async function restoreTree(cwd: string, tree: string): Promise<{ paths: s
   for (let start = 0; start < restore.length; start += 500) {
     await git(repository.top, ["restore", `--source=${tree}`, "--worktree", "--", ...restore.slice(start, start + 500)]);
   }
-  for (const path of remove) await rm(join(repository.top, path), { force: true });
-  return { paths: [...restore, ...remove].map((path) => join(cwd, path.slice(prefix.length))).sort(), insertions, deletions };
+  // One path that can't be removed must not stop the rest, which have already been put back. A
+  // repository made inside the folder since the snapshot shows here as a single entry that is a
+  // directory: it is left where it is, since removing it would delete a whole checkout.
+  const removed: string[] = [];
+  const left: string[] = [];
+  for (const path of remove) {
+    await rm(join(repository.top, path), { force: true }).then(() => removed.push(path), () => left.push(path));
+  }
+  const absolute = (paths: string[]) => paths.map((path) => join(cwd, path.slice(prefix.length))).sort();
+  return { paths: absolute([...restore, ...removed]), insertions, deletions, ...(left.length ? { skipped: absolute(left) } : {}) };
 }
 
 /** Snapshot tree IDs by turn for one thread, kept in the repository's git folder so they outlive the process. */
@@ -137,12 +146,17 @@ export class CheckpointStore {
 interface Hunk {
   newStart: number;
   lines: Array<{ op: " " | "-" | "+"; text: string }>;
+  /** A no-newline marker followed a line of the old file: the old file did not end in a newline. */
+  oldNoNewline?: boolean;
+  /** The same for the new file. */
+  newNoNewline?: boolean;
 }
 
 /**
  * Parses `@@ -a,b +c,d @@` hunks, reading only as many lines as each header
  * counts, so a diff's trailing newline is not taken for an empty context line.
- * The no-newline marker is skipped.
+ * A no-newline marker is not a line of either file: it is recorded on the hunk
+ * for the side, or sides, of the line it follows.
  */
 function parseHunks(diff: string): Hunk[] {
   const hunks: Hunk[] = [];
@@ -157,6 +171,13 @@ function parseHunks(diff: string): Hunk[] {
       continue;
     }
     const hunk = hunks[hunks.length - 1];
+    if (hunk && line.startsWith("\\")) {
+      // After a removed line it speaks for the old file, after an added one for the new, after context for both.
+      const op = hunk.lines[hunk.lines.length - 1]?.op;
+      if (op === "-" || op === " ") hunk.oldNoNewline = true;
+      if (op === "+" || op === " ") hunk.newNoNewline = true;
+      continue;
+    }
     if (!hunk || line.startsWith("\\") || (oldLeft <= 0 && newLeft <= 0)) continue;
     // Some tools write an empty context line without its leading space.
     const op = line === "" ? " " : line[0];
@@ -175,8 +196,13 @@ function parseHunks(diff: string): Hunk[] {
 export function reverseDiff(text: string, diff: string): string | undefined {
   const trailingNewline = text.endsWith("\n");
   const lines = text === "" ? [] : (trailingNewline ? text.slice(0, -1) : text).split("\n");
+  const hunks = parseHunks(diff);
+  // A marker means the diff reached the end of the file, so it says how the original ended: without
+  // a final newline if the marker was on its side, with one if it was only on the new side.
+  const marked = hunks.some((hunk) => hunk.oldNoNewline || hunk.newNoNewline);
+  const endsWithNewline = marked ? !hunks.some((hunk) => hunk.oldNoNewline) : trailingNewline || !text;
   // Last hunk first, so earlier line numbers stay right.
-  for (const hunk of parseHunks(diff).reverse()) {
+  for (const hunk of hunks.reverse()) {
     const after = hunk.lines.filter((line) => line.op !== "-").map((line) => line.text);
     const before = hunk.lines.filter((line) => line.op !== "+").map((line) => line.text);
     const matches = (at: number) => after.every((line, offset) => lines[at + offset] === line);
@@ -190,13 +216,23 @@ export function reverseDiff(text: string, diff: string): string | undefined {
     if (at < 0) return undefined;
     lines.splice(at, after.length, ...before);
   }
-  return lines.length ? lines.join("\n") + (trailingNewline || !text ? "\n" : "") : "";
+  return lines.length ? lines.join("\n") + (endsWithNewline ? "\n" : "") : "";
 }
+
+/** The lines a diff adds (`+`) or removes (`-`), across its hunks, in order. */
+function sideOf(diff: string, op: "+" | "-"): string[] {
+  return parseHunks(diff).flatMap((hunk) => hunk.lines.filter((line) => line.op === op).map((line) => line.text));
+}
+
+/** Text without its one final newline, so a file compares equal to a diff's lines whether or not it ends in one. */
+const withoutFinalNewline = (text: string) => (text.endsWith("\n") ? text.slice(0, -1) : text);
 
 /**
  * Undoes file changes, given newest first: an added file is removed, a deleted
  * one written back from its diff, a moved one moved back, an update reversed.
- * Files whose current text no longer matches the change are skipped.
+ * Files whose current text no longer matches the change are skipped: an added
+ * file that has been rewritten since, a deleted one whose path holds something
+ * again, an update whose lines are no longer there.
  */
 export async function reverseChanges(changes: readonly FileChange[]): Promise<{ paths: string[]; skipped: string[] }> {
   const paths = new Set<string>();
@@ -204,9 +240,23 @@ export async function reverseChanges(changes: readonly FileChange[]): Promise<{ 
   for (const change of changes) {
     try {
       if (change.kind === "add") {
-        await rm(change.path, { force: true });
+        const current = await readFile(change.path, "utf8").catch(() => undefined);
+        // Already gone: nothing to undo. Still there but no longer what the turn wrote: the user's now.
+        if (current !== undefined) {
+          // No diff means the turn wrote an empty file: every normalizer leaves out the diff of one.
+          if (withoutFinalNewline(current) !== sideOf(change.diff ?? "", "+").join("\n")) {
+            skipped.add(change.path);
+            continue;
+          }
+          await rm(change.path, { force: true });
+        }
       } else if (change.kind === "delete") {
-        const text = parseHunks(change.diff ?? "").flatMap((hunk) => hunk.lines.filter((line) => line.op === "-").map((line) => line.text));
+        // Something has been put at the path since the turn deleted it: writing the old text back would replace it.
+        if (await stat(change.path).then(() => true, () => false)) {
+          skipped.add(change.path);
+          continue;
+        }
+        const text = sideOf(change.diff ?? "", "-");
         await mkdir(dirname(change.path), { recursive: true });
         await writeFile(change.path, text.length ? `${text.join("\n")}\n` : "");
       } else {

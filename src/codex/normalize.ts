@@ -267,8 +267,10 @@ const ENDED_AGENT = new Set(["completed", "errored", "shutdown", "interrupted", 
 
 /** Notifications for one thread and its subagents, as neutral events. */
 export class CodexNormalizer {
-  /** Latest rate limit windows, kept to date a usage-limit failure. */
+  /** Latest rate limit windows across every bucket, kept to date a usage-limit failure. */
   limits: RateLimit[] = [];
+  /** The latest windows of each bucket, by its `limitId`. An update names one bucket and may carry only some of its windows. */
+  private readonly limitsByBucket = new Map<string, RateLimit[]>();
   /** The turn currently running on the main thread. */
   currentTurnId = "";
   private readonly subagents = new Set<string>();
@@ -303,8 +305,16 @@ export class CodexNormalizer {
     const p = record(params) ?? {};
     // Account-wide notifications carry no thread.
     if (method === "account/rateLimits/updated") {
-      this.limits = codexRateLimits(record(p.rateLimits));
-      return this.limits.map((limit) => this.event({ type: "rate-limit", limit }));
+      const snapshot = record(p.rateLimits);
+      const updated = codexRateLimits(snapshot);
+      // Merged, not replaced: an update for another bucket (a model's own limit), or one carrying only
+      // one window, must not forget the window that has filled and dates the failure that follows.
+      const bucket = typeof snapshot?.limitId === "string" ? snapshot.limitId : "codex";
+      const slot = (limit: RateLimit) => limit.window?.split(" ")[0];
+      const kept = (this.limitsByBucket.get(bucket) ?? []).filter((limit) => !updated.some((next) => slot(next) === slot(limit)));
+      this.limitsByBucket.set(bucket, [...kept, ...updated]);
+      this.limits = [...this.limitsByBucket.values()].flat();
+      return updated.map((limit) => this.event({ type: "rate-limit", limit }));
     }
     // An MCP server the app-server started for every thread.
     if (method === "mcpServer/startupStatus/updated" && (p.threadId === null || p.threadId === undefined)) return [this.mcpStatus(p)];

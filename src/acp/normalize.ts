@@ -85,6 +85,8 @@ function noticeKind(severity: unknown): NoticeKind {
 /** ACP config options as neutral settings. Options of a type this client does not know are left out. */
 export function acpSettings(options: readonly Json[]): ThreadSetting[] {
   return options.flatMap((option): ThreadSetting[] => {
+    // The list comes from the agent: an entry that isn't an object is no setting.
+    if (!record(option)) return [];
     const base = {
       id: String(option.id),
       name: String(option.name ?? option.id),
@@ -94,7 +96,7 @@ export function acpSettings(options: readonly Json[]): ThreadSetting[] {
     if (option.type === "boolean") return [{ ...base, type: "boolean", value: option.currentValue === true }];
     // A missing type is a select, as before ACP added toggles.
     if (option.type !== undefined && option.type !== "select") return [];
-    const entries: Json[] = Array.isArray(option.options) ? option.options : [];
+    const entries: Json[] = (Array.isArray(option.options) ? option.options : []).filter((entry: unknown) => record(entry));
     const values: Json[] = entries.flatMap((entry) => (Array.isArray(entry.options)
       ? entry.options.map((inner: Json) => ({ ...inner, group: String(entry.name ?? entry.group) }))
       : [entry]));
@@ -251,7 +253,8 @@ export class AcpNormalizer {
       case "plan":
         return [...this.closeOpen(), { ...this.base(), type: "plan.updated", steps: planSteps(update.entries) }];
       case "available_commands_update":
-        this.commands = (Array.isArray(update.availableCommands) ? update.availableCommands : []).map((command: Json) => ({
+        // Entries that aren't objects are passed over rather than read: the list comes from the agent.
+        this.commands = (Array.isArray(update.availableCommands) ? update.availableCommands : []).filter((command: unknown) => record(command)).map((command: Json) => ({
           name: String(command.name),
           kind: "command" as const,
           ...(command.description ? { description: String(command.description) } : {}),

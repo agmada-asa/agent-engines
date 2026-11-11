@@ -5,7 +5,7 @@ import { test } from "node:test";
 import { CodexEngine } from "../src/codex/engine.ts";
 import { RuntimeAuthError, RuntimeModelSubstitutionError, SteerRejectedError } from "../src/errors.ts";
 import type { AgentEvent } from "../src/types.ts";
-import { FakeAppServer, fakeSpawner, until } from "./fake-app-server.ts";
+import { FakeAppServer, NO_REPLY, fakeSpawner, until } from "./fake-app-server.ts";
 
 const THREAD = "019a-thread";
 
@@ -423,6 +423,50 @@ test("a host tool can return images and audio as well as text", async () => {
     ],
     success: true,
   });
+  await engine.close();
+});
+
+test("a turn that can't start because Codex is signed out fails as auth, and one on a hung app-server as connection", async () => {
+  let signedIn = true;
+  let hang = false;
+  const { spawn, children } = fakeSpawner({
+    "account/read": () => (signedIn ? { account: { type: "chatgpt", email: "a@b.c", planType: "plus" }, requiresOpenaiAuth: true } : { account: null, requiresOpenaiAuth: true }),
+    "thread/start": () => ({ thread: { id: THREAD }, model: "m" }),
+    "thread/resume": (params: any) => ({ thread: { id: params.threadId }, model: "m" }),
+    "turn/start": () => (hang ? NO_REPLY : { turn: { id: "turn-1", items: [], status: "inProgress" } }),
+  });
+  const engine = new CodexEngine({ spawnProcess: spawn, requestTimeoutMs: 100 });
+  const thread = await engine.startThread({ cwd: "/tmp" });
+  // The sign-in is lost and the child restarts: the next turn can't start.
+  signedIn = false;
+  children[0].exit();
+  await new Promise((resolve) => setTimeout(resolve, 20));
+  const signedOut = await thread.run("Hi").result;
+  assert.equal(signedOut.status, "failed");
+  assert.equal(signedOut.error?.kind, "auth");
+  // Signed in again, but the app-server never answers turn/start.
+  signedIn = true;
+  hang = true;
+  const hung = await thread.run("Hi").result;
+  assert.equal(hung.status, "failed");
+  assert.equal(hung.error?.kind, "connection");
+  await engine.close();
+});
+
+test("interrupt() on a turn that failed to start resolves without asking Codex to interrupt nothing", async () => {
+  const { spawn, children } = fakeSpawner({
+    "thread/start": () => ({ thread: { id: THREAD }, model: "m" }),
+    "turn/start": () => new Error("model is not available"),
+    "turn/interrupt": (params: any) => (params.turnId ? {} : new Error("invalid turnId")),
+  });
+  const engine = new CodexEngine({ spawnProcess: spawn });
+  const thread = await engine.startThread({ cwd: "/tmp" });
+  const turn = thread.run("Hi");
+  // Asked to stop while turn/start is still pending, as an app's Stop button can.
+  const stopping = turn.interrupt();
+  assert.equal((await turn.result).status, "failed");
+  await assert.doesNotReject(stopping);
+  assert.deepEqual(children[0].requests("turn/interrupt"), []);
   await engine.close();
 });
 

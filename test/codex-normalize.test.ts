@@ -177,6 +177,31 @@ test("usage, rate limits and a usage-limit failure with its reset time", () => {
   assert.equal((failed[0] as any).usage.totalTokens, 120);
 });
 
+test("a usage-limit failure keeps its reset time after an update for another bucket or a sparse one", () => {
+  const usageLimit = (n: CodexNormalizer) => {
+    n.normalize("error", { threadId: T, turnId: "turn-1", willRetry: false, error: { message: "You've hit your usage limit.", codexErrorInfo: "usageLimitExceeded", additionalDetails: null } });
+    return (n.normalize("turn/completed", { threadId: T, turn: { id: "turn-1", status: "failed", items: [], error: null } })[0] as any).error;
+  };
+  const used = { usedPercent: 100, windowDurationMins: 300, resetsAt: 1792673294 };
+  // A model-specific bucket reports after the account's own bucket filled.
+  const other = normalizer();
+  other.normalize("account/rateLimits/updated", { rateLimits: { limitId: "codex", primary: used, secondary: null } });
+  const events = other.normalize("account/rateLimits/updated", { rateLimits: { limitId: "codex_other", primary: { usedPercent: 3, windowDurationMins: 300, resetsAt: 1792680000 }, secondary: null } });
+  // Only the windows this update carried are announced.
+  assert.deepEqual(events.map((event) => (event as any).limit.usedPercent), [3]);
+  assert.equal(usageLimit(other).resetsAt?.getTime(), 1792673294 * 1000);
+  // An update for the same bucket that carries only its weekly window.
+  const sparse = normalizer();
+  sparse.normalize("account/rateLimits/updated", { rateLimits: { primary: used, secondary: null } });
+  sparse.normalize("account/rateLimits/updated", { rateLimits: { primary: null, secondary: { usedPercent: 14, windowDurationMins: 10080, resetsAt: 1793089658 } } });
+  assert.equal(usageLimit(sparse).resetsAt?.getTime(), 1792673294 * 1000);
+  // A newer report of the same window replaces the old one.
+  const reset = normalizer();
+  reset.normalize("account/rateLimits/updated", { rateLimits: { primary: used, secondary: null } });
+  reset.normalize("account/rateLimits/updated", { rateLimits: { primary: { usedPercent: 2, windowDurationMins: 300, resetsAt: 1792691294 }, secondary: null } });
+  assert.equal(usageLimit(reset).resetsAt, undefined);
+});
+
 test("an interrupted turn completes with status interrupted", () => {
   const n = normalizer();
   const events = n.normalize("turn/completed", { threadId: T, turn: { id: "turn-1", status: "interrupted", items: [], error: null } });

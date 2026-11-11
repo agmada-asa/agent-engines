@@ -248,8 +248,10 @@ export interface RewindResult {
   /**
    * For `files: true`: the files put back, and how. `checkpoint` restored the
    * runtime's or the engine's own snapshot; `edits` undid the recorded edits,
-   * which leaves files a shell command wrote, and `skipped` lists files whose
-   * text no longer matched.
+   * which leaves files a shell command wrote. `skipped` lists what was left as
+   * it is: for `edits`, files whose text no longer matched; for an engine
+   * snapshot, added paths that could not be removed, such as a repository
+   * cloned into the folder.
    */
   files?: { paths: string[]; insertions?: number; deletions?: number; method?: "checkpoint" | "edits"; skipped?: string[] };
 }

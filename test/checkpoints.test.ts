@@ -110,6 +110,35 @@ test("reverseDiff takes Codex's diffs, which end in a newline, including a hunk 
   assert.equal(reverseDiff("a\n\nB\n", "@@ -1,3 +1,3 @@\n a\n\n-b\n+B\n"), "a\n\nb\n");
 });
 
+test("reverseDiff gives back the original's final newline, or its absence", () => {
+  for (const [before, after] of [
+    ["a\nb", "a\nB\n"], // the edit added a final newline
+    ["a\nb\n", "a\nB"], // the edit removed it
+    ["a\nb", "a\nB"], // neither side has one
+    ["a\nb\n", "a\nb\nc"], // a line added at the end, without one
+    ["a\nb", "a\nb\nc\n"],
+  ]) {
+    assert.equal(reverseDiff(after!, unifiedDiff(before!, after!)), before, `${JSON.stringify(after)} back to ${JSON.stringify(before)}`);
+  }
+  // Every pair of short random texts, with and without a final newline on either side.
+  let seed = 7;
+  const random = (below: number) => ((seed = (seed * 1103515245 + 12345) % 2 ** 31), seed % below);
+  const text = () => {
+    const lines = Array.from({ length: 1 + random(12) }, () => "abcde"[random(5)]!);
+    return lines.join("\n") + (random(3) ? "\n" : "");
+  };
+  let wrong = 0;
+  let cases = 0;
+  for (let index = 0; index < 400; index += 1) {
+    const before = text();
+    const after = text();
+    if (before === after) continue;
+    cases += 1;
+    if (reverseDiff(after, unifiedDiff(before, after)) !== before) wrong += 1;
+  }
+  assert.equal(wrong, 0, `${wrong} of ${cases} random edits did not reverse exactly`);
+});
+
 test("reverseDiff finds a hunk that moved, and refuses one that no longer matches", () => {
   const diff = unifiedDiff("a\nb\nc\n", "a\nB\nc\n");
   assert.equal(reverseDiff("header\nextra\na\nB\nc\n", diff), "header\nextra\na\nb\nc\n");
@@ -142,6 +171,74 @@ test("reverseChanges undoes adds, deletes, updates and moves, newest first, and 
   assert.equal(await exists(movedTo), false);
   assert.deepEqual(result.skipped, [drifted]);
   assert.deepEqual(result.paths, [added, deleted, moved, updated].sort());
+});
+
+test("a restore finishes when the turn made a repository of its own inside the folder, and leaves that repository", async () => {
+  const dir = await repository();
+  const tree = await snapshotTree(dir);
+  // During the turn: an edit, a new file, and a cloned or newly made repository, which git records as one entry.
+  await writeFile(join(dir, "tracked.txt"), "one\nTWO\n");
+  await writeFile(join(dir, "new.txt"), "made by the agent\n");
+  await mkdir(join(dir, "vendor"));
+  const nested = (...args: string[]) => execFileSync("git", args, { cwd: join(dir, "vendor"), stdio: "ignore" });
+  nested("init", "-q");
+  nested("config", "user.email", "test@example.com");
+  nested("config", "user.name", "Test");
+  await writeFile(join(dir, "vendor", "lib.txt"), "theirs\n");
+  nested("add", ".");
+  nested("commit", "-qm", "vendored");
+
+  const restored = await restoreTree(dir, tree);
+  assert.equal(await readFile(join(dir, "tracked.txt"), "utf8"), "one\ntwo\n");
+  assert.equal(await exists(join(dir, "new.txt")), false);
+  assert.equal(await readFile(join(dir, "vendor", "lib.txt"), "utf8"), "theirs\n", "a whole repository is not deleted as if it were a file");
+  assert.deepEqual(restored.paths, [join(dir, "new.txt"), join(dir, "tracked.txt")]);
+  assert.deepEqual(restored.skipped, [join(dir, "vendor")]);
+});
+
+test("reverseChanges leaves alone a file the user changed after the turn added or deleted it", async () => {
+  const dir = await folder("edits-drift");
+  const rewritten = join(dir, "notes.md");
+  const recreated = join(dir, "old.txt");
+  const untouched = join(dir, "scratch.txt");
+  const alreadyGone = join(dir, "gone.txt");
+  const filledIn = join(dir, "__init__.py");
+  const stillEmpty = join(dir, "empty.txt");
+  // The turn added notes.md and scratch.txt and deleted old.txt. Since then the user rewrote
+  // notes.md and made a new old.txt of their own. It also added two empty files, which carry no
+  // diff, and the user has since written in one of them.
+  await writeFile(rewritten, "my own notes, written after the turn\n");
+  await writeFile(recreated, "a new file of mine\n");
+  await writeFile(untouched, "draft\n");
+  await writeFile(filledIn, "from .core import run\n");
+  await writeFile(stillEmpty, "");
+  const result = await reverseChanges([
+    { path: rewritten, kind: "add", diff: wholeFileDiff("+", "agent draft\n") },
+    { path: recreated, kind: "delete", diff: wholeFileDiff("-", "a\nb\n") },
+    { path: untouched, kind: "add", diff: wholeFileDiff("+", "draft\n") },
+    { path: alreadyGone, kind: "add", diff: wholeFileDiff("+", "x\n") },
+    { path: filledIn, kind: "add" },
+    { path: stillEmpty, kind: "add" },
+  ]);
+  assert.equal(await readFile(rewritten, "utf8"), "my own notes, written after the turn\n");
+  assert.equal(await readFile(recreated, "utf8"), "a new file of mine\n");
+  assert.equal(await readFile(filledIn, "utf8"), "from .core import run\n");
+  assert.equal(await exists(untouched), false);
+  assert.equal(await exists(stillEmpty), false);
+  assert.deepEqual(result.skipped, [filledIn, rewritten, recreated].sort());
+  assert.deepEqual(result.paths, [alreadyGone, stillEmpty, untouched].sort());
+});
+
+test("reverseChanges removes a file the turn added and then edited, undoing the edit first", async () => {
+  const dir = await folder("edits-add-then-update");
+  const file = join(dir, "new.txt");
+  await writeFile(file, "one\nTWO\n");
+  const result = await reverseChanges([
+    { path: file, kind: "update", diff: unifiedDiff("one\ntwo\n", "one\nTWO\n") },
+    { path: file, kind: "add", diff: wholeFileDiff("+", "one\ntwo\n") },
+  ]);
+  assert.equal(await exists(file), false);
+  assert.deepEqual(result, { paths: [file], skipped: [] });
 });
 
 /** A fake app-server whose turns the test finishes, with a turn history for rewind. */

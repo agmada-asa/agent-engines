@@ -184,7 +184,7 @@ export class AcpClient {
     const hasId = message.id !== undefined && message.id !== null;
     if (typeof message.method === "string") {
       if (hasId) void this.answer(message.id, message.method, message.params);
-      else for (const listener of this.notificationListeners) listener(message.method, message.params);
+      else this.emitNotification(message.method, message.params);
       return;
     }
     if (!hasId) return;
@@ -225,6 +225,27 @@ export class AcpClient {
     this.child.kill("SIGTERM");
     const force = setTimeout(() => this.child.kill("SIGKILL"), KILL_GRACE_MS);
     force.unref?.();
-    for (const listener of this.closeListeners) listener(error);
+    for (const listener of this.closeListeners) {
+      try {
+        listener(error);
+      } catch {
+        // One consumer's failure must not keep the others from hearing the connection closed.
+      }
+    }
+  }
+
+  /**
+   * Hands a notification to every listener. This runs inside the child's stdout handler, where a
+   * throw would surface as an uncaught exception in the host process and leave the rest of the
+   * chunk unread, so a listener that fails is passed over.
+   */
+  private emitNotification(method: string, params: unknown): void {
+    for (const listener of this.notificationListeners) {
+      try {
+        listener(method, params);
+      } catch {
+        // A consumer must not break protocol correlation.
+      }
+    }
   }
 }

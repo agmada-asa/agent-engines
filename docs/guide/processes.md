@@ -12,7 +12,8 @@
 A failed turn has an `error.kind`.
 
 - `usage-limit` and `rate-limit` come with `resetsAt` when the runtime says, so an app can try again then. A transient overload doesn't inherit an unrelated subscription reset time.
-- `connection` means a network failure.
+- `connection` means the runtime couldn't be reached or stopped answering: a network failure, or a Codex app-server that didn't reply in time.
+- `auth` means the runtime isn't signed in, so an app can offer a sign-in. `model` means the model asked for isn't available, or the runtime answered with another one.
 - Authentication and context errors stay distinct, even if an earlier usage report was rejected.
 
 ## Who handles recovery

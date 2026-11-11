@@ -19,8 +19,8 @@ await thread.run("The edited prompt");
 
 `rewind` reports how it restored files as `files.method`:
 
-- **`checkpoint`**: Claude's own file checkpoints (`fileCheckpoints: true`), or on Codex a git snapshot the engine takes before each turn when the thread has `fileCheckpoints` and its folder is in a git repository. The snapshot goes into git's object store through a temporary index, so branches, the index and the working tree are not touched, and its ID is kept under the repository's git folder. A rewind restores whatever changed in the thread's folder since then, including files a shell command wrote, and anyone else's edits there in the meantime. Untracked files over 10 MB are left out.
-- **`edits`** (Codex without a snapshot): the edits Codex recorded in the dropped turns are undone, newest first. Files a shell command wrote are left as they are, and a file whose text has changed since is listed in `files.skipped`.
+- **`checkpoint`**: Claude's own file checkpoints (`fileCheckpoints: true`), or on Codex a git snapshot the engine takes before each turn when the thread has `fileCheckpoints` and its folder is in a git repository. The snapshot goes into git's object store through a temporary index, so branches, the index and the working tree are not touched, and its ID is kept under the repository's git folder. A rewind restores whatever changed in the thread's folder since then, including files a shell command wrote, and anyone else's edits there in the meantime. Untracked files over 10 MB are left out. A repository made inside the folder since the snapshot (a `git clone`, say) is not deleted: it stays where it is and is listed in `files.skipped`.
+- **`edits`** (Codex without a snapshot): the edits Codex recorded in the dropped turns are undone, newest first. Files a shell command wrote are left as they are. A file that has changed since is left alone and listed in `files.skipped`: one the turn edited or added whose text is different now, or one it deleted that is back at its path.
 
 Files are put back before the conversation is rewound. If Codex then fails to drop the turns, `rewind` throws `ConversationRevertError`. Its `files` says what was put back, and the turns are still in the conversation, so tell the agent in the next prompt.
 
@@ -78,4 +78,4 @@ const transcript = await claudeThread.export();
 const codexThread = await codex.startThread({ cwd, seed: transcript });
 ```
 
-Codex adds the earlier conversation to the thread's history. Claude and ACP agents get it before the first message. Reasoning is left out and long tool output is shortened.
+Codex adds the earlier conversation to the thread's history. Claude and ACP agents get it before the first message. Reasoning is left out, and a tool call's input and output are each shortened to their first 2,000 characters, so a turn that wrote large files doesn't make the seed larger than the next runtime can take.

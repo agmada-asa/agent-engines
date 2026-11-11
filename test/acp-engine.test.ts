@@ -237,6 +237,44 @@ test("startThread fails on a model the agent does not offer, and sets nothing", 
   await engine.close();
 });
 
+test("a malformed update from the agent is passed over, and the turn carries on", async () => {
+  const { engine } = engineWith({
+    "session/prompt": (params, server) => {
+      // Entries that aren't objects, where the protocol has a list of them. Read carelessly, each throws
+      // inside the client's stdout handler, which would end the host process as an uncaught exception.
+      server.update(params.sessionId, { sessionUpdate: "available_commands_update", availableCommands: [null, { name: "review", description: "Review the changes" }, "junk"] });
+      server.update(params.sessionId, { sessionUpdate: "config_option_update", configOptions: [null, { id: "mode", name: "Mode", options: [null, { value: "ask", name: "Ask" }] }] });
+      server.update(params.sessionId, { sessionUpdate: "agent_message_chunk", content: { type: "text", text: "Still here" } });
+      return { stopReason: "end_turn" };
+    },
+  });
+  const thread = await engine.startThread({ cwd: CWD });
+  const turn = thread.run("Say hello");
+  const events = await drain(turn);
+  assert.equal((await turn.result).text, "Still here");
+  assert.deepEqual((await engine.commands()).map((command) => command.name), ["review"]);
+  const settings = ofType(events, "settings.updated").at(-1)!.settings;
+  assert.deepEqual(settings.map((setting) => setting.id), ["mode"]);
+  assert.deepEqual(settings[0]!.type === "select" && settings[0].options.map((option) => option.value), ["ask"]);
+  await engine.close();
+});
+
+test("a listener that throws doesn't stop the client reading the agent", async () => {
+  const { engine } = engineWith({
+    "session/prompt": (params, server) => {
+      server.update(params.sessionId, { sessionUpdate: "agent_message_chunk", content: { type: "text", text: "Hello" } });
+      return { stopReason: "end_turn" };
+    },
+  });
+  const thread = await engine.startThread({ cwd: CWD });
+  // The engine's own client, reached the way the engine does, with a consumer that fails on every notification.
+  const client = await (engine as unknown as { client: Promise<{ onNotification(listener: () => void): unknown }> }).client;
+  client.onNotification(() => { throw new Error("a consumer's bug"); });
+  const turn = thread.run("Say hello");
+  assert.equal((await turn.result).text, "Hello");
+  await engine.close();
+});
+
 test("run() streams message chunks as text deltas, then text.done and the reply", async () => {
   const { engine } = engineWith({
     "session/prompt": (params, server) => {
