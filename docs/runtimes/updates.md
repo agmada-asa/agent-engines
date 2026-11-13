@@ -57,11 +57,20 @@ A success returns `{ outcome, from, to, ... }`. Anything else throws `RuntimeUpd
 - Before anything ran: `invalid-version`, `not-updatable`, `lookup-failed`, `incompatible-target`, `in-progress`
 - After: `installer-failed`, `version-mismatch`, `incompatible-result`, `sdk-check-failed`
 
+## ACP agents
+
+An ACP engine with an `updater` (the `ACP_AGENTS.opencode` and `ACP_AGENTS.antigravity` presets set one) reads the agent's version with `--version`, without starting it, and moves it with the agent's own updater. `provider` stays `acp`.
+
+- **OpenCode.** `latest` comes from OpenCode's update service, the one `opencode upgrade` asks, and a Homebrew install is answered with its formula's version. `opencode upgrade` finds the installer itself. It can go to an exact version, except under Homebrew, which goes to the latest only.
+- **Antigravity.** `latest` is the stable version its update server publishes, and `agy update` goes to it, so it can't pin a version. A Homebrew copy isn't updated: `canUpdate` is false and `reason` says to use brew.
+
+`managedBy` is `homebrew` or `self`. There is no compatibility floor for ACP agents, so `compatible` is undefined. An update counts when `--version` reports the target, or a newer version when the updater can't pin.
+
 ## Release notes
 
-`runtimeReleaseNotes(provider, { from, to })` returns `[{ version, text }]` for the versions after `from` up to `to`, newest first.
+`runtimeReleaseNotes(provider, { from, to })` returns `[{ version, text }]` for the versions after `from` up to `to`, newest first. `provider` is `codex`, `claude`, `opencode` or `antigravity`.
 
-- Codex's come from its GitHub releases, leaving out prereleases unless `to` is one. Claude Code's come from its changelog, where not every version has an entry.
+- Codex's and OpenCode's come from their GitHub releases, leaving out prereleases unless `to` is one. Claude Code's come from its changelog, where not every version has an entry. Antigravity has none this library can read, so its notes are always empty.
 - They're as published minus the Markdown, not summarised. They're outside text, so treat them as data.
 - Any failure gives fewer notes or none, never an error.
 - GitHub allows about 60 API calls an hour without a sign-in, and Codex's notes cost one per minor version and one per release, so a long jump reads only the newest ten minors.

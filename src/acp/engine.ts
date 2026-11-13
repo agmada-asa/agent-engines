@@ -17,7 +17,7 @@ import { AgentEngineError, RuntimeConnectionError, SteerRejectedError, Unsupport
 import { isTextMedia, localFileSearch, readFileInput } from "../files.ts";
 import { seedPreamble } from "../handoff.ts";
 import { reviewPrompt } from "../review.ts";
-import { acpRuntimeVersion } from "../runtime-updates.ts";
+import { acpRuntimeVersion, acpUpdateRuntime, type AcpUpdater } from "../runtime-updates.ts";
 import { TurnHandle, emitTo, inputParts, prefixInput } from "../turn.ts";
 import type {
   AgentEvent,
@@ -71,7 +71,8 @@ type Json = Record<string, any>;
 
 /** ACP agents this library knows how to start. Any other is `{ command, args }`. */
 export const ACP_AGENTS = {
-  opencode: { name: "OpenCode", command: "opencode", args: ["acp"] },
+  opencode: { name: "OpenCode", command: "opencode", args: ["acp"], updater: "opencode" },
+  antigravity: { name: "Antigravity", command: "agy", args: ["acp"], updater: "antigravity" },
   gemini: { name: "Gemini CLI", command: "gemini", args: ["--acp"] },
 } as const;
 
@@ -93,6 +94,12 @@ export interface AcpEngineOptions {
   requestTimeoutMs?: number;
   /** Client name the agent records. */
   clientName?: string;
+  /**
+   * The agent's own updater, which `runtimeVersion` and `updateRuntime` drive:
+   * `opencode` (`opencode upgrade`) or `antigravity` (`agy update`). Without one they
+   * only say whether the command is there.
+   */
+  updater?: AcpUpdater;
   /** Injectable process factory for tests. */
   spawnProcess?: SpawnAcpProcess;
 }
@@ -209,7 +216,7 @@ export class AcpEngine implements Engine {
       listTasks: false,
       stopTask: false,
       mcp: { setServers: false, reconnect: false, toggle: false, login: false, readResource: false },
-      runtimeUpdate: false,
+      runtimeUpdate: Boolean(this.options.updater),
       login: false,
       logout: record(agent.auth)?.logout != null,
       hookEvents: false,
@@ -236,11 +243,13 @@ export class AcpEngine implements Engine {
 
   /** Whether the agent's command is there, without starting it. A version shows only once it has started and said. */
   runtimeVersion(options: RuntimeCheckOptions = {}): Promise<RuntimeVersionStatus> {
-    return acpRuntimeVersion(this.name, this.options.command, this.init?.agentInfo?.version, { ...options, env: this.options.env });
+    return acpRuntimeVersion(this.name, this.options.command, this.init?.agentInfo?.version, { ...options, env: this.options.env, updater: this.options.updater });
   }
 
-  async updateRuntime(_options: RuntimeUpdateOptions = {}): Promise<RuntimeUpdateResult> {
-    throw new UnsupportedFeatureError("update its runtime", this.name, `update ${this.options.command} the way you installed it`);
+  /** Runs the agent's own updater, for an engine with an `updater`. The running agent keeps its process; a new engine starts the new version. */
+  async updateRuntime(options: RuntimeUpdateOptions = {}): Promise<RuntimeUpdateResult> {
+    if (!this.options.updater) throw new UnsupportedFeatureError("update its runtime", this.name, `update ${this.options.command} the way you installed it`);
+    return acpUpdateRuntime(this.options.updater, this.options.command, { ...options, env: this.options.env });
   }
 
   async usage(): Promise<UsageReport> {

@@ -5,7 +5,7 @@ import { chmod, mkdir, mkdtemp, realpath, rm, symlink, writeFile } from "node:fs
 import { tmpdir } from "node:os";
 import { basename, dirname, join, resolve } from "node:path";
 import { after, test } from "node:test";
-import { AcpEngine } from "../src/acp/engine.ts";
+import { ACP_AGENTS, AcpEngine } from "../src/acp/engine.ts";
 import { ClaudeEngine } from "../src/claude/engine.ts";
 import { CodexEngine } from "../src/codex/engine.ts";
 import { RuntimeUpdateError, UnsupportedFeatureError, type RuntimeUpdateFailure } from "../src/errors.ts";
@@ -911,6 +911,117 @@ test("AcpEngine: says plainly that it cannot, without starting the agent", async
   assert.equal((await new AcpEngine({ command: "gone", env }).runtimeVersion({ host })).installed, false);
 });
 
+const OPENCODE_BREW = "https://opencode.ai/update/api/latest/cli/homebrew?current=2.2.7";
+const OPENCODE_NPM = "https://opencode.ai/update/api/latest/cli/npm?current=2.2.7";
+const AGY_UPDATER = "https://antigravity-cli-auto-updater-974169037036.us-central1.run.app/";
+
+/** OpenCode from a Homebrew tap. */
+function brewOpencode(extra: Partial<FakeMachine> = {}): FakeMachine {
+  return {
+    path: "/opt/homebrew/bin",
+    executables: ["/opt/homebrew/bin/opencode"],
+    links: { "/opt/homebrew/bin/opencode": "/opt/homebrew/Cellar/opencode-v2/2.2.7/bin/opencode" },
+    version: "v2.2.7",
+    documents: { [OPENCODE_BREW]: { version: "2.3.0", metadata: { package: "anomalyco/tap/opencode-v2" } } },
+    ...extra,
+  };
+}
+
+test("OpenCode from Homebrew: its tap's version from OpenCode's update service, and `opencode upgrade` to the latest only", async () => {
+  const { host, ran, looked, env } = fake(brewOpencode({ install: (machine) => void (machine.version = "v2.3.0") }));
+  let spawned = false;
+  const engine = new AcpEngine({
+    ...ACP_AGENTS.opencode,
+    env,
+    spawnProcess: (...args) => {
+      spawned = true;
+      return fakeAcpSpawner().spawn(...args);
+    },
+  });
+  const status = await engine.runtimeVersion({ host });
+  assert.equal(status.provider, "acp");
+  assert.equal(status.version, "2.2.7");
+  assert.equal(status.latest, "2.3.0");
+  assert.equal(status.managedBy, "homebrew");
+  assert.equal(status.newerAvailable, true);
+  assert.equal(status.canUpdate, true);
+  assert.equal(status.canPinVersion, false);
+  assert.equal(status.updateOffered, true);
+  assert.deepEqual(status.updateCommand, ["/opt/homebrew/bin/opencode", "upgrade"]);
+  assert.equal(status.reason, undefined);
+  assert.deepEqual(looked.map((lookup) => lookup.url), [OPENCODE_BREW]);
+
+  const result = await engine.updateRuntime({ host });
+  assert.equal(spawned, false, "checking and updating never start the agent");
+  assert.equal(result.outcome, "updated");
+  assert.equal(result.from, "2.2.7");
+  assert.equal(result.to, "2.3.0");
+  assert.deepEqual(ran.map((run) => run.argv), [["/opt/homebrew/bin/opencode", "upgrade"]]);
+  assert.match(ran[0].env.PATH ?? "", /^\/opt\/homebrew\/bin/);
+  await failure(engine.updateRuntime({ host, version: "2.2.7" }), "not-updatable");
+  assert.equal((await engine.capabilities()).runtimeUpdate, true);
+  await engine.close();
+});
+
+test("OpenCode installed on its own: pinned to the version asked for, and a binary that didn't move is a failure", async () => {
+  const self = {
+    path: "/home/me/.opencode/bin",
+    executables: ["/home/me/.opencode/bin/opencode"],
+    version: "2.2.7",
+    documents: { [OPENCODE_NPM]: { version: "2.3.0" } },
+  };
+  const moved = fake({ ...self, install: (machine) => void (machine.version = "2.3.0") });
+  const engine = new AcpEngine({ ...ACP_AGENTS.opencode, env: moved.env });
+  const status = await engine.runtimeVersion({ host: moved.host });
+  assert.equal(status.managedBy, "self");
+  assert.equal(status.canPinVersion, true);
+  assert.equal((await engine.updateRuntime({ host: moved.host })).to, "2.3.0");
+  assert.deepEqual(moved.ran.map((run) => run.argv), [["/home/me/.opencode/bin/opencode", "upgrade", "2.3.0"]]);
+
+  const stuck = fake(self);
+  const error = await failure(new AcpEngine({ ...ACP_AGENTS.opencode, env: stuck.env }).updateRuntime({ host: stuck.host }), "version-mismatch");
+  assert.equal(error.from, "2.2.7");
+  assert.equal(error.to, "2.2.7");
+
+  const offline = fake({ ...self, offline: true });
+  const unknown = await new AcpEngine({ ...ACP_AGENTS.opencode, env: offline.env }).runtimeVersion({ host: offline.host });
+  assert.equal(unknown.latest, undefined);
+  assert.equal(unknown.updateOffered, false);
+  assert.match(unknown.reason ?? "", /could not be looked up/);
+});
+
+test("Antigravity: the stable version from its update server, `agy update`, and a Homebrew copy left to brew", async () => {
+  const machine: FakeMachine = {
+    path: "/home/me/.local/bin",
+    executables: ["/home/me/.local/bin/agy"],
+    version: "1.5.8",
+    documents: { [AGY_UPDATER]: "Antigravity CLI auto updater is running! Stable Version: 1.6.0. Rolled out to 100%" },
+    install: (current) => void (current.version = "1.6.0"),
+  };
+  const { host, ran, env } = fake(machine);
+  const engine = new AcpEngine({ ...ACP_AGENTS.antigravity, env });
+  const status = await engine.runtimeVersion({ host });
+  assert.equal(status.latest, "1.6.0");
+  assert.equal(status.managedBy, "self");
+  assert.equal(status.updateOffered, true);
+  assert.equal(status.canPinVersion, false);
+  assert.equal((await engine.updateRuntime({ host })).to, "1.6.0");
+  assert.deepEqual(ran.map((run) => run.argv), [["/home/me/.local/bin/agy", "update"]]);
+  assert.equal((await engine.updateRuntime({ host })).outcome, "up-to-date");
+
+  const garbled = fake({ ...machine, documents: { [AGY_UPDATER]: "Stable Version: soon" } });
+  assert.equal((await new AcpEngine({ ...ACP_AGENTS.antigravity, env: garbled.env }).runtimeVersion({ host: garbled.host })).latest, undefined);
+
+  const brew = fake({ ...machine, links: { "/home/me/.local/bin/agy": "/opt/homebrew/Caskroom/antigravity/1.5.8/agy" } });
+  const brewed = new AcpEngine({ ...ACP_AGENTS.antigravity, env: brew.env });
+  const brewStatus = await brewed.runtimeVersion({ host: brew.host });
+  assert.equal(brewStatus.canUpdate, false);
+  assert.equal(brewStatus.updateOffered, false);
+  assert.match(brewStatus.reason ?? "", /Update it with brew/);
+  await failure(brewed.updateRuntime({ host: brew.host }), "not-updatable");
+  assert.deepEqual(brew.ran, []);
+});
+
 // Finding the shared Claude
 
 /** The `claude` on PATH as an npm global, under a prefix found on the given PATH. */
@@ -1125,6 +1236,26 @@ test("Codex notes: a long jump reads only the newest minors, and a new major onl
   const major = fake({ documents: release("1.0.0", "a new major") });
   assert.deepEqual(await runtimeReleaseNotes("codex", { from: "0.166.0", to: "1.0.0", host: major.host }), [{ version: "1.0.0", text: "a new major" }]);
   assert.equal(major.looked.length, 1);
+});
+
+test("OpenCode notes: its GitHub releases tagged v<version>; Antigravity publishes none to read", async () => {
+  const repo = "https://api.github.com/repos/anomalyco/opencode";
+  const { host, looked } = fake({
+    documents: {
+      [`${repo}/git/matching-refs/tags/v2.3.?per_page=100`]: [{ ref: "refs/tags/v2.3.0" }],
+      [`${repo}/git/matching-refs/tags/v2.2.?per_page=100`]: [{ ref: "refs/tags/v2.2.7" }, { ref: "refs/tags/v2.2.8" }, { ref: "refs/tags/process-daemon-v0.5.2" }],
+      [`${repo}/releases/tags/v2.3.0`]: { body: "## New\n- **Faster** startup", draft: false },
+      [`${repo}/releases/tags/v2.2.8`]: { body: "A fix", draft: false },
+    },
+  });
+  assert.deepEqual(await runtimeReleaseNotes("opencode", { from: "2.2.7", to: "2.3.0", host }), [
+    { version: "2.3.0", text: "New\n- Faster startup" },
+    { version: "2.2.8", text: "A fix" },
+  ]);
+  assert.ok(looked.every((lookup) => lookup.url.startsWith(repo)));
+  const agy = fake({});
+  assert.deepEqual(await runtimeReleaseNotes("antigravity", { from: "1.5.8", to: "1.6.0", host: agy.host }), []);
+  assert.deepEqual(agy.looked, []);
 });
 
 test("Claude notes: read from the changelog, per version, and versions with no entry are simply missing", async () => {
