@@ -269,7 +269,8 @@ async function locate(command: string, env: Env, host: RuntimeHost): Promise<str
 async function readVersion(binary: string, name: string, env: Env, host: RuntimeHost): Promise<{ version?: string; problem?: string }> {
   // Outside any project: pnpm switches to the version a `packageManager` field in the current folder names.
   const result = await host.exec(binary, ["--version"], { env: withPath(env, dirname(binary)), cwd: tmpdir(), timeoutMs: VERSION_TIMEOUT_MS });
-  const version = result.exitCode === 0 ? result.stdout.match(/\b\d+\.\d+\.\d+(?:-[0-9A-Za-z.-]+)?\b/u)?.[0] : undefined;
+  // OpenCode prints `v2.2.7`, so a leading `v` is allowed.
+  const version = result.exitCode === 0 ? result.stdout.match(/(?<![\w.])v?(\d+\.\d+\.\d+(?:-[0-9A-Za-z.-]+)?)\b/u)?.[1] : undefined;
   if (version) return { version };
   const detail = result.error ?? (`${result.stderr}${result.stdout}`.trim().split("\n").at(-1) || `it exited with code ${result.exitCode}`);
   return { problem: `The ${name} version could not be read: ${detail}` };
@@ -716,34 +717,44 @@ function notesBetween(notes: readonly RuntimeReleaseNote[], from: string, to: st
     .sort((left, right) => (isNewer(left.version, right.version) ? -1 : isNewer(right.version, left.version) ? 1 : 0));
 }
 
+/** A GitHub repository whose releases are tagged `<prefix><version>`. */
+interface GithubReleases {
+  repo: string;
+  tagPrefix: string;
+}
+
+const CODEX_RELEASES: GithubReleases = { repo: "openai/codex", tagPrefix: "rust-v" };
+const OPENCODE_RELEASES: GithubReleases = { repo: "anomalyco/opencode", tagPrefix: "v" };
+
 /** Fetches one GitHub API document. */
-function githubJson(path: string, timeoutMs: number, host: RuntimeHost): Promise<unknown> {
-  return fetchBody(`https://api.github.com/repos/openai/codex/${path}`, "application/vnd.github+json", timeoutMs, host, (response) => response.json());
+function githubJson(repo: string, path: string, timeoutMs: number, host: RuntimeHost): Promise<unknown> {
+  return fetchBody(`https://api.github.com/repos/${repo}/${path}`, "application/vnd.github+json", timeoutMs, host, (response) => response.json());
 }
 
 /**
- * Which Codex versions to read notes for: its release tags in the range, with `to`
+ * Which versions to read notes for: the release tags in the range, with `to`
  * always among them. The tags are read minor by minor, because the list of
  * releases carries every release's assets and runs to tens of megabytes a page.
  */
-async function codexVersionsBetween(from: string, to: string, timeoutMs: number, host: RuntimeHost): Promise<string[]> {
+async function taggedVersionsBetween(releases: GithubReleases, from: string, to: string, timeoutMs: number, host: RuntimeHost): Promise<string[]> {
   const [fromMajor, fromMinor] = parseRuntimeVersion(from) as readonly [number, number, number];
   const [toMajor, toMinor] = parseRuntimeVersion(to) as readonly [number, number, number];
   if (fromMajor !== toMajor) return [to];
+  const { repo, tagPrefix } = releases;
   const minors = Array.from({ length: Math.min(toMinor - fromMinor + 1, MAX_NOTES_MINORS) }, (_, index) => toMinor - index);
-  const lists = await Promise.all(minors.map((minor) => githubJson(`git/matching-refs/tags/rust-v${toMajor}.${minor}.?per_page=100`, timeoutMs, host)));
+  const lists = await Promise.all(minors.map((minor) => githubJson(repo, `git/matching-refs/tags/${tagPrefix}${toMajor}.${minor}.?per_page=100`, timeoutMs, host)));
   const tagged = lists.flatMap((refs) => (Array.isArray(refs) ? (refs as Array<{ ref?: unknown } | null>) : []))
-    .map((entry) => (typeof entry?.ref === "string" ? strict(entry.ref.replace(/^refs\/tags\/rust-v/u, "")) : undefined))
+    .map((entry) => (typeof entry?.ref === "string" && entry.ref.startsWith(`refs/tags/${tagPrefix}`) ? strict(entry.ref.slice(`refs/tags/${tagPrefix}`.length)) : undefined))
     .filter((version): version is string => version !== undefined && !version.includes("-"));
   return [...new Set([to, ...tagged])].filter((version) => isNewer(version, from) && !isNewer(version, to));
 }
 
-/** Codex's GitHub releases. Prereleases are skipped unless one is what the update went to. */
-async function codexNotes(from: string, to: string, timeoutMs: number, host: RuntimeHost): Promise<RuntimeReleaseNote[]> {
-  const versions = await codexVersionsBetween(from, to, timeoutMs, host);
+/** A project's GitHub releases. Prereleases are skipped unless one is what the update went to. */
+async function githubNotes(releases: GithubReleases, from: string, to: string, timeoutMs: number, host: RuntimeHost): Promise<RuntimeReleaseNote[]> {
+  const versions = await taggedVersionsBetween(releases, from, to, timeoutMs, host);
   const notes = await Promise.all(
     versions.map(async (version) => {
-      const release = (await githubJson(`releases/tags/rust-v${version}`, timeoutMs, host)) as { body?: unknown; draft?: unknown } | null | undefined;
+      const release = (await githubJson(releases.repo, `releases/tags/${releases.tagPrefix}${version}`, timeoutMs, host)) as { body?: unknown; draft?: unknown } | null | undefined;
       return typeof release?.body === "string" && release.draft !== true ? { version, text: plainText(release.body) } : undefined;
     }),
   );
@@ -769,23 +780,88 @@ async function claudeNotes(timeoutMs: number, host: RuntimeHost): Promise<Runtim
  * What a project published for the versions after `from`, up to and including
  * `to`, newest first and one entry per version that has notes. Any failure, bad
  * version included, gives fewer notes or none, never an error: notes are a nicety.
- * Codex's come from its GitHub releases, Claude Code's from its changelog.
+ * Codex's and OpenCode's come from their GitHub releases, Claude Code's from its
+ * changelog; Antigravity publishes none this library can read.
  * Unsummarised, and text from outside: treat it as data, not instructions.
  */
-export async function runtimeReleaseNotes(provider: ManagedProvider, options: { from: string; to: string; timeoutMs?: number; host?: Partial<RuntimeHost> }): Promise<RuntimeReleaseNote[]> {
+export async function runtimeReleaseNotes(provider: ManagedProvider | AcpUpdater, options: { from: string; to: string; timeoutMs?: number; host?: Partial<RuntimeHost> }): Promise<RuntimeReleaseNote[]> {
   const { from, to } = options;
   if (!isStrictSemver(from) || !isStrictSemver(to) || !isNewer(to, from)) return [];
   const host = hostFrom(options.host);
   const timeoutMs = options.timeoutMs ?? NOTES_TIMEOUT_MS;
-  return notesBetween(provider === "codex" ? await codexNotes(from, to, timeoutMs, host) : await claudeNotes(timeoutMs, host), from, to);
+  if (provider === "antigravity") return [];
+  const notes =
+    provider === "codex" ? await githubNotes(CODEX_RELEASES, from, to, timeoutMs, host)
+    : provider === "opencode" ? await githubNotes(OPENCODE_RELEASES, from, to, timeoutMs, host)
+    : await claudeNotes(timeoutMs, host);
+  return notesBetween(notes, from, to);
+}
+
+/** ACP agents whose own updater this library can drive. */
+export type AcpUpdater = "opencode" | "antigravity";
+
+/** How one ACP agent's own updater is asked what's new and told to move. */
+interface AcpSpec {
+  name: string;
+  /** The newest version this install's updater would go to. */
+  lookup(managedBy: RuntimeManager, version: string | undefined, timeoutMs: number, host: RuntimeHost): Promise<string | undefined>;
+  /** The update command. `version` is passed on only when `canPin` says the updater honours it. */
+  command(binary: string, version: string, managedBy: RuntimeManager): readonly string[];
+  canPin(managedBy: RuntimeManager): boolean;
+  /** Why this install can't be moved by the agent's own updater, if it can't. */
+  blocked?(managedBy: RuntimeManager): string | undefined;
+}
+
+const ACP_SPECS: Record<AcpUpdater, AcpSpec> = {
+  opencode: {
+    name: "OpenCode",
+    // The service `opencode upgrade` asks. A Homebrew install is answered with its tap's version.
+    lookup: async (managedBy, version, timeoutMs, host) => {
+      const channel = managedBy === "homebrew" ? "homebrew" : "npm";
+      const document = await fetchDocument(`https://opencode.ai/update/api/latest/cli/${channel}?current=${encodeURIComponent(version ?? "0.0.0")}`, timeoutMs, host);
+      return strict(document?.version);
+    },
+    // `opencode upgrade` finds its own installer: npm, pnpm, bun, its curl script or Homebrew.
+    command: (binary, version, managedBy) => (managedBy === "homebrew" ? [binary, "upgrade"] : [binary, "upgrade", version]),
+    // Homebrew goes only to its formula's latest.
+    canPin: (managedBy) => managedBy !== "homebrew",
+  },
+  antigravity: {
+    name: "Antigravity",
+    // The CLI's own update server says its stable version on its front page.
+    lookup: async (_managedBy, _version, timeoutMs, host) => {
+      const page = await fetchBody("https://antigravity-cli-auto-updater-974169037036.us-central1.run.app/", "text/plain", timeoutMs, host, (response) => response.text());
+      const found = typeof page === "string" ? page.match(/Stable Version:\s*(\S+)/u)?.[1]?.replace(/\.+$/u, "") : undefined;
+      return strict(found);
+    },
+    command: (binary) => [binary, "update"],
+    canPin: () => false,
+    blocked: (managedBy) => (managedBy === "homebrew" ? "Antigravity is installed with Homebrew. Update it with brew." : undefined),
+  },
+};
+
+/** Who owns an ACP agent's binary, as far as its own updater cares. */
+const acpOwner = (path: string): RuntimeManager => (/\/(Caskroom|Cellar)\//u.test(path) ? "homebrew" : "self");
+
+/** Finds an ACP agent's binary, its version and who owns it. */
+async function inspectAcp(spec: AcpSpec, command: string, env: Env, host: RuntimeHost) {
+  const binary = await locate(command, env, host);
+  if (!binary) return undefined;
+  const path = await host.realpath(binary).catch(() => binary);
+  const read = await readVersion(binary, spec.name, env, host);
+  const managedBy = acpOwner(path);
+  return { binary, path, managedBy, version: read.version, versionProblem: read.problem, blocked: spec.blocked?.(managedBy) };
 }
 
 /**
- * The status of an ACP agent. The protocol has no notion of installers, so this
- * only says whether its command is there; `version` is what a running agent reported.
+ * The status of an ACP agent. Without an `updater` the protocol says nothing about
+ * installers, so this only says whether its command is there, and `version` is what a
+ * running agent reported. With one, the agent's own `--version` and update service
+ * answer, and `updateRuntime` runs its own updater.
  */
-export async function acpRuntimeVersion(name: string, command: string, version: string | undefined, options: { env?: Env } & RuntimeCheckOptions = {}): Promise<RuntimeVersionStatus> {
+export async function acpRuntimeVersion(name: string, command: string, version: string | undefined, options: { env?: Env; updater?: AcpUpdater } & RuntimeCheckOptions = {}): Promise<RuntimeVersionStatus> {
   const host = hostFrom(options.host);
+  if (options.updater) return acpManagedVersion(ACP_SPECS[options.updater], command, options, host);
   const binary = await locate(command, options.env ?? process.env, host);
   return {
     provider: "acp",
@@ -800,4 +876,86 @@ export async function acpRuntimeVersion(name: string, command: string, version: 
     reason: `This library cannot check or update ACP agents. Update ${name} the way you installed it.`,
     checkedAt: new Date(),
   };
+}
+
+/** An ACP agent's status from its own `--version` and update service. */
+async function acpManagedVersion(spec: AcpSpec, command: string, options: { env?: Env } & RuntimeCheckOptions, host: RuntimeHost): Promise<RuntimeVersionStatus> {
+  const found = await inspectAcp(spec, command, options.env ?? process.env, host);
+  const base = { provider: "acp" as const, checkedAt: new Date() };
+  if (!found) {
+    return { ...base, installed: false, managedBy: "unknown", newerAvailable: false, canUpdate: false, canPinVersion: false, updateOffered: false, reason: `${spec.name} is not installed: ${command} was not found.` };
+  }
+  const { binary, path, managedBy, version, versionProblem, blocked } = found;
+  const latest = await spec.lookup(managedBy, version, options.lookupTimeoutMs ?? LOOKUP_TIMEOUT_MS, host);
+  const newerAvailable = Boolean(latest && version && isNewer(latest, version));
+  const canUpdate = !blocked;
+  let reason: string | undefined;
+  if (blocked) reason = blocked;
+  else if (versionProblem) reason = versionProblem;
+  else if (!latest) reason = `The latest ${spec.name} version could not be looked up.`;
+  return {
+    ...base,
+    installed: true,
+    version,
+    latest,
+    path,
+    managedBy,
+    newerAvailable,
+    canUpdate,
+    canPinVersion: canUpdate && spec.canPin(managedBy),
+    updateOffered: Boolean(canUpdate && latest && (newerAvailable || versionProblem)),
+    updateCommand: canUpdate && latest ? spec.command(binary, latest, managedBy) : undefined,
+    reason,
+  };
+}
+
+/**
+ * Moves an ACP agent with its own updater, to the latest version or to
+ * `options.version` where the updater can pin one, then reads the version back.
+ * Throws `RuntimeUpdateError` for everything short of a verified result.
+ */
+export async function acpUpdateRuntime(updater: AcpUpdater, command: string, options: { env?: Env } & RuntimeUpdateOptions = {}): Promise<RuntimeUpdateResult> {
+  const requested = options.version;
+  if (requested !== undefined && !isStrictSemver(requested)) {
+    throw new RuntimeUpdateError("invalid-version", `${JSON.stringify(requested)} is not a strict semver version such as 1.2.3.`);
+  }
+  const host = hostFrom(options.host);
+  const spec = ACP_SPECS[updater];
+  const env = options.env ?? process.env;
+  const found = await inspectAcp(spec, command, env, host);
+  if (!found) throw new RuntimeUpdateError("not-updatable", `${spec.name} is not installed: ${command} was not found.`, { target: requested });
+  const { binary, path, managedBy, version: from, blocked } = found;
+  if (blocked) throw new RuntimeUpdateError("not-updatable", blocked, { from, target: requested });
+  const pins = spec.canPin(managedBy);
+  if (requested && !pins) {
+    const owner = managedBy === "homebrew" ? "Homebrew" : `${spec.name}'s own updater`;
+    throw new RuntimeUpdateError("not-updatable", `${owner} can only move ${spec.name} to its latest version, not to ${requested}.`, { from, target: requested });
+  }
+  const target = requested ?? (await spec.lookup(managedBy, from, options.lookupTimeoutMs ?? LOOKUP_TIMEOUT_MS, host));
+  if (!target) throw new RuntimeUpdateError("lookup-failed", `The latest ${spec.name} version could not be looked up.`, { from });
+  if (from && (from === target || (!requested && !isNewer(target, from)))) {
+    return { provider: "acp", outcome: "up-to-date", from, to: from, managedBy, path };
+  }
+
+  const lock = `acp:${updater}:${path}`;
+  if (updating.has(lock)) throw new RuntimeUpdateError("in-progress", `An update of ${binary} is already running.`, { from, target });
+  updating.add(lock);
+  try {
+    const argv = spec.command(binary, target, managedBy);
+    const ran = await host.exec(argv[0], argv.slice(1), { env: withPath(env, dirname(binary)), cwd: tmpdir(), timeoutMs: options.timeoutMs ?? UPDATE_TIMEOUT_MS });
+    const output = `${ran.stdout}${ran.stderr}`.slice(-MAX_OUTPUT_CHARS);
+    const read = await readVersion(binary, spec.name, env, host);
+    const to = read.version;
+    const details = { from, to, target, exitCode: ran.exitCode, output, command: argv };
+    if (ran.error || ran.exitCode !== 0) {
+      throw new RuntimeUpdateError("installer-failed", `Updating ${spec.name} failed: ${ran.error ?? `it exited with code ${ran.exitCode}`}. It now reports ${to ?? "no version"}.`, details);
+    }
+    if (!to) throw new RuntimeUpdateError("version-mismatch", `The updater finished, but ${read.problem ?? `${spec.name} reports no version`}.`, details);
+    if (pins ? to !== target : to !== target && !isNewer(to, target)) {
+      throw new RuntimeUpdateError("version-mismatch", `The updater finished, but ${spec.name} reports ${to} and not ${pins ? target : `${target} or newer`}.`, details);
+    }
+    return { provider: "acp", outcome: "updated", from, to, managedBy, path: await host.realpath(binary).catch(() => binary), command: argv, output };
+  } finally {
+    updating.delete(lock);
+  }
 }

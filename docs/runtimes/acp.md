@@ -10,7 +10,7 @@ const gemini = createEngine("acp", ACP_AGENTS.gemini);
 const custom = createEngine("acp", { command: "my-agent", args: ["--acp"] });
 ```
 
-What it can do comes from the agent's `initialize` answer, so `capabilities()` differs from agent to agent. `ACP_AGENTS` has the commands for OpenCode (`opencode acp`) and Gemini CLI (`gemini --acp`).
+What it can do comes from the agent's `initialize` answer, so `capabilities()` differs from agent to agent. `ACP_AGENTS` has the commands for OpenCode (`opencode acp`), Antigravity (`agy acp`, CLI 1.5 or later) and Gemini CLI (`gemini --acp`).
 
 ## What's different
 
@@ -21,7 +21,7 @@ What it can do comes from the agent's `initialize` answer, so `capabilities()` d
 - **Resuming** loads the session, which replays its history into `history()`.
 - **Probing.** `models()` and `commands()` open a session in a temporary folder when no thread is open, and the agent may keep it in its own list.
 - **Files and terminals** stay with the agent. The engine doesn't offer the client file system or terminal.
-- **Updates.** ACP agents report whether their command is there, and `updateRuntime()` throws `UnsupportedFeatureError`.
+- **Updates.** An engine with an `updater` checks and moves the agent with the agent's own updater; see [Updating OpenCode and Antigravity](updates.md#acp-agents). Without one, `runtimeVersion()` only says whether the command is there, and `updateRuntime()` throws `UnsupportedFeatureError`.
 
 ## Questions
 
