@@ -835,6 +835,11 @@ class ClaudeThread implements Thread {
   private giveUp?: ReturnType<typeof setTimeout>;
   /** A prompt given up on may still run late: the turn it starts is stopped at once. */
   private abandoned = false;
+  /**
+   * The current turn's prompt is a slash command (`/compact` and the like),
+   * which Claude Code answers itself with a zero-turn result and no model output.
+   */
+  private localPrompt = false;
   private lastText = "";
   private expectedModel?: string;
   private prompted: boolean;
@@ -904,6 +909,7 @@ class ClaudeThread implements Thread {
   run(input: TurnInput, turnOptions: TurnOptions = {}): Turn {
     if (this.activeTurn) throw new AgentEngineError("A turn is already running on this thread; steer it or wait for it to end.");
     const turn = this.newTurn();
+    this.localPrompt = (typeof input === "string" ? input : input.text).trimStart().startsWith("/");
     void (async () => {
       try {
         if (turnOptions.serviceTier !== undefined) throw new UnsupportedFeatureError("select a service tier", "Claude", "use fastMode instead");
@@ -941,6 +947,7 @@ class ClaudeThread implements Thread {
   compact(): Turn {
     if (this.activeTurn) throw new AgentEngineError("A turn is already running on this thread; compact after it ends.");
     const turn = this.newTurn();
+    this.localPrompt = true;
     void this.ready().then(() => this.send(userMessage("/compact", { uuid: turn.turnId! })), (error) => this.failTurn(turn, error));
     return turn;
   }
@@ -1166,6 +1173,7 @@ class ClaudeThread implements Thread {
     this.turnRunning = false;
     this.pendingStop = undefined;
     this.abandoned = false;
+    this.localPrompt = false;
     this.lastText = "";
     this.normalizer.startTurn();
     this.dispatch({ threadId: this.id, turnId: turn.turnId!, type: "turn.started" });
@@ -1323,6 +1331,7 @@ class ClaudeThread implements Thread {
       }
     }
     if (m.type === "result" && turn) {
+      if (this.isStrayResult(m)) return;
       // A steer Claude could not fold into this turn runs as the next one; the turn covers both.
       // After an interrupt the turn ends here, and anything still queued runs as a new turn.
       if (!this.interruptRequested && typeof m.queued_turn_count === "number" && m.queued_turn_count > 0) return;
@@ -1341,6 +1350,23 @@ class ClaudeThread implements Thread {
         this.finish(turn, { status: "failed", usage, error });
       }
     }
+  }
+
+  /**
+   * Whether a result belongs to no prompt of the current turn. A resumed
+   * session whose previous process left background tasks behind first reports
+   * them stopped, then writes an empty success result with `num_turns: 0` and
+   * no `user_message_uuid`, before it reads the waiting prompt. Taking that as
+   * the prompt's answer would end the turn empty and leave the real answer to
+   * run as a turn nobody asked for. A slash command also ends with zero turns
+   * and no output, so a turn whose prompt is one is never skipped; nor is a
+   * result after an interrupt, or one that echoes the prompt it answers.
+   */
+  private isStrayResult(m: Record<string, any>): boolean {
+    if (this.turnRunning || this.interruptRequested || this.localPrompt) return false;
+    if (m.subtype !== "success" || m.is_error || m.num_turns !== 0) return false;
+    const echoed = typeof m.user_message_uuid === "string" || (Array.isArray(m.user_message_uuids) && m.user_message_uuids.length > 0);
+    return !echoed;
   }
 
   private finish(turn: TurnHandle, outcome: { status: TurnResult["status"]; text?: string; output?: unknown; usage?: ReturnType<typeof claudeUsage>; error?: TurnResult["error"] }): void {

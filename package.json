@@ -1,6 +1,6 @@
 {
   "name": "agent-engines",
-  "version": "0.9.0",
+  "version": "0.9.1",
   "description": "One thread, turn and event API for Codex app-server, the Claude Agent SDK and ACP agents.",
   "license": "MIT",
   "author": "Agmada Allen Asa",

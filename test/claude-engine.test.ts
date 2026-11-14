@@ -384,6 +384,44 @@ test("compact sends /compact and reports the compaction", async () => {
   await engine.close();
 });
 
+test("a resumed session's empty zero-turn result does not end the prompt's turn", async () => {
+  // The order Claude Code 2.1.322 sends on resume when the last process left a background shell behind.
+  const { sdk, queries } = fakeClaudeSdk({
+    onUser: (message, query) => {
+      query.emit({ type: "system", subtype: "task_notification", task_id: "old-shell", status: "stopped", summary: "Background shell stopped" });
+      query.emit({ type: "system", subtype: "init", model: "claude-haiku-5-5", claude_code_version: "2.1.322" });
+      query.emit({ type: "result", subtype: "success", is_error: false, result: "", num_turns: 0, modelUsage: {} });
+      for (const reply of replyMessages("The real answer")) {
+        query.emit(reply.type === "result" ? { ...reply, user_message_uuid: message.uuid, user_message_uuids: [message.uuid] } : reply);
+      }
+    },
+  });
+  const engine = new ClaudeEngine({ sdk });
+  const thread = await engine.startThread({ cwd: "/tmp" });
+  const started: string[] = [];
+  thread.subscribe((event) => {
+    if (event.type === "turn.started") started.push(event.turnId);
+  });
+  const turn = thread.run("Continue");
+  const result = await turn.result;
+  assert.equal(result.status, "completed");
+  assert.equal(result.text, "The real answer");
+  assert.equal(queries[0].inputs.length, 1);
+  assert.deepEqual(started, [await turn.id], "the real answer must not start a turn of its own");
+  await engine.close();
+});
+
+test("a slash command's zero-turn result still ends its turn", async () => {
+  const { sdk } = fakeClaudeSdk({
+    onUser: (_message, query) => query.emit({ type: "result", subtype: "success", is_error: false, result: "", num_turns: 0, modelUsage: {} }),
+  });
+  const engine = new ClaudeEngine({ sdk });
+  const thread = await engine.startThread({ cwd: "/tmp" });
+  assert.equal((await thread.run("/context").result).status, "completed");
+  assert.equal((await thread.compact().result).status, "completed");
+  await engine.close();
+});
+
 test("permission prompts and AskUserQuestion surface as requests", async () => {
   const { sdk, queries } = fakeClaudeSdk();
   const engine = new ClaudeEngine({ sdk });
