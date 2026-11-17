@@ -22,6 +22,14 @@ Support varies by runtime. See [Capabilities](/runtimes/capabilities) for the co
 
 `CodexEngine.mcpStatus()` also lists the app-server's MCP servers before any thread starts.
 
+### Keeping MCP secrets off the command line
+
+On Claude, a thread's stdio and HTTP servers reach Claude Code over stdin by default, so their `env` and `headers` (tokens, keys) never show up in the process list. This needs Claude Code 2.1.326 or newer, which is what the SDK bundles. If you set your own `executable`, the engine falls back to passing them in `--mcp-config` on the command line, which works with any version. Set `mcpServersDelivery` on the engine to choose:
+
+```ts
+const engine = new ClaudeEngine({ executable: "/usr/local/bin/claude", mcpServersDelivery: "initialize" });
+```
+
 ### Telling a Codex thread its tool names
 
 `codex.listMcpTools` tells a new thread its MCP tool names, so the model needn't search `ALL_TOOLS`. It defaults to false and runs on new and forked threads, not resumes.

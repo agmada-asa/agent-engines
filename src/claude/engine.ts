@@ -186,6 +186,14 @@ export interface ClaudeEngineOptions {
   sdk?: ClaudeSdk;
   /** Claude Code executable; defaults to the binary the SDK bundles. */
   executable?: string;
+  /**
+   * How a thread's stdio and HTTP MCP servers reach Claude Code. `initialize` sends
+   * them over stdin, so their `env` and `headers` stay off the command line, where
+   * other users of the machine can read them; it needs Claude Code 2.1.326 or newer.
+   * `argv` passes them in `--mcp-config` and works with any version. Defaults to
+   * `initialize` with the bundled Claude Code and `argv` with your own `executable`.
+   */
+  mcpServersDelivery?: "argv" | "initialize";
   /** Base environment for every Claude Code process; defaults to the current one. A plain record, so apps whose `ProcessEnv` requires keys (Next.js) can pass one. */
   env?: Readonly<Record<string, string | undefined>>;
   /**
@@ -699,6 +707,15 @@ export class ClaudeEngine implements Engine {
     return this.options.configDir ?? process.env.CLAUDE_CONFIG_DIR ?? join(homedir(), ".claude");
   }
 
+  /**
+   * @internal How MCP servers reach a Claude Code process. Always set, since the SDK warns
+   * when a custom executable leaves it unset; only the bundled one is sure to take `initialize`.
+   * `ownClaudeCode` is true when the process isn't the bundled binary (an executable or spawner was given).
+   */
+  mcpServersDelivery(ownClaudeCode: boolean): "argv" | "initialize" {
+    return this.options.mcpServersDelivery ?? (ownClaudeCode ? "argv" : "initialize");
+  }
+
   /** @internal The child environment: base plus thread extras, minus API keys when required. */
   environment(extra: Record<string, string> = {}): Record<string, string> {
     const env: Record<string, string> = { CLAUDE_AGENT_SDK_CLIENT_APP: "agent-engines" };
@@ -743,6 +760,7 @@ export class ClaudeEngine implements Engine {
         mcpServers: {},
         persistSession: false,
         ...(this.options.executable ? { pathToClaudeCodeExecutable: this.options.executable } : {}),
+        mcpServersDelivery: this.mcpServersDelivery(Boolean(this.options.executable)),
       },
     });
     let timer: ReturnType<typeof setTimeout> | undefined;
@@ -1461,6 +1479,10 @@ class ClaudeThread implements Thread {
       ...(claude.hooks ? { hooks: claude.hooks as Options["hooks"] } : {}),
       ...(claude.plugins ? { plugins: claude.plugins } : {}),
       ...((claude.executable ?? this.engine.options.executable) ? { pathToClaudeCodeExecutable: claude.executable ?? this.engine.options.executable } : {}),
+      // `extra` can also start a different Claude Code, and it's merged after this.
+      mcpServersDelivery: this.engine.mcpServersDelivery(Boolean(
+        claude.executable ?? this.engine.options.executable ?? claude.extra?.pathToClaudeCodeExecutable ?? claude.extra?.spawnClaudeCodeProcess,
+      )),
       ...(schema ? { outputFormat: { type: "json_schema", schema } } : {}),
       ...(limits.maxTurns !== undefined ? { maxTurns: limits.maxTurns } : {}),
       ...(limits.maxBudgetUsd !== undefined ? { maxBudgetUsd: limits.maxBudgetUsd } : {}),

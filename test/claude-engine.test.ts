@@ -665,6 +665,36 @@ test("alwaysLoad reaches stdio and http servers", async () => {
   await engine.close();
 });
 
+test("MCP servers go over stdin with the bundled Claude Code and on the command line with a custom one", async () => {
+  const bundled = fakeClaudeSdk();
+  const engine = new ClaudeEngine({ sdk: bundled.sdk });
+  await engine.startThread({ cwd: "/tmp", mcpServers: { notes: { command: "node", env: { TOKEN: "secret" } } } });
+  await engine.usage();
+  assert.deepEqual(bundled.queries.map((query) => query.options.mcpServersDelivery), ["initialize", "initialize"]);
+  await engine.close();
+
+  const custom = fakeClaudeSdk();
+  const own = new ClaudeEngine({ sdk: custom.sdk, executable: "/opt/claude" });
+  await own.startThread({ cwd: "/tmp" });
+  await own.startThread({ cwd: "/tmp", claude: { executable: "/opt/claude-next" } });
+  assert.deepEqual(custom.queries.map((query) => query.options.mcpServersDelivery), ["argv", "argv"]);
+  await own.close();
+
+  const extra = fakeClaudeSdk();
+  const viaExtra = new ClaudeEngine({ sdk: extra.sdk });
+  await viaExtra.startThread({ cwd: "/tmp", claude: { extra: { pathToClaudeCodeExecutable: "/opt/claude" } } });
+  await viaExtra.startThread({ cwd: "/tmp", claude: { extra: { spawnClaudeCodeProcess: () => undefined } } });
+  await viaExtra.startThread({ cwd: "/tmp", claude: { extra: { spawnClaudeCodeProcess: () => undefined, mcpServersDelivery: "initialize" } } });
+  assert.deepEqual(extra.queries.map((query) => query.options.mcpServersDelivery), ["argv", "argv", "initialize"]);
+  await viaExtra.close();
+
+  const chosen = fakeClaudeSdk();
+  const opted = new ClaudeEngine({ sdk: chosen.sdk, executable: "/opt/claude", mcpServersDelivery: "initialize" });
+  await opted.startThread({ cwd: "/tmp" });
+  assert.equal(chosen.queries[0].options.mcpServersDelivery, "initialize");
+  await opted.close();
+});
+
 test("interruptTurn stops the active turn by ID and ignores any other", async () => {
   const { sdk, queries } = fakeClaudeSdk({
     onInterrupt: (query) => query.emit({ type: "result", subtype: "error_during_execution", is_error: true, errors: [], modelUsage: {} }),
