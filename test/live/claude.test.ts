@@ -5,6 +5,7 @@ import { mkdtemp, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
+import { fileURLToPath } from "node:url";
 import { ClaudeEngine } from "../../src/claude/engine.ts";
 import { parityScenario } from "./parity.ts";
 import { LIVE, smokeScenario } from "./scenario.ts";
@@ -83,6 +84,34 @@ test("Claude: a subagent's real model is confirmed from its own messages", { ski
     assert.ok(subagents.size > 0, "the subagent started");
     assert.ok(confirmed.some((entry) => !entry.agentId && entry.model.includes("haiku")), "the main agent is confirmed on its own model");
     assert.ok(confirmed.some((entry) => entry.agentId && subagents.has(entry.agentId) && entry.model.includes("sonnet")), "the subagent is confirmed on sonnet, by its subagent ID");
+  } finally {
+    if (threadId) await engine.deleteThread(threadId, { cwd }).catch(() => undefined);
+    await engine.close();
+    await rm(cwd, { recursive: true, force: true });
+  }
+});
+
+test("Claude: a stdio MCP server delivered over stdin starts with its env", { skip: !LIVE && "set AGENT_ENGINES_LIVE=1", timeout: 180_000 }, async (t) => {
+  const engine = new ClaudeEngine();
+  const cwd = await mkdtemp(join(tmpdir(), "agent-engines-live-claude-"));
+  const token = `token-${Date.now()}`;
+  let threadId: string | undefined;
+  try {
+    const thread = await engine.startThread({
+      cwd, model: MODEL, effort: "low", access: "full",
+      mcpServers: { envcheck: { command: process.execPath, args: [fileURLToPath(new URL("./env-mcp.mjs", import.meta.url))], env: { LIVE_MCP_TOKEN: token } } },
+      claude: { settingSources: [], strictMcpConfig: true, skills: [] },
+    });
+    threadId = thread.id;
+    let output: string | undefined;
+    const turn = thread.run("Call the read_token tool from the envcheck MCP server, then reply with exactly what it returned.");
+    for await (const event of turn) {
+      if (event.type === "tool.completed" && event.tool.name === "mcp__envcheck__read_token") output = event.output;
+    }
+    const result = await turn.result;
+    t.diagnostic(`mcp turn: ${result.status} tool output "${output}"`);
+    assert.equal(result.status, "completed");
+    assert.equal(output, token);
   } finally {
     if (threadId) await engine.deleteThread(threadId, { cwd }).catch(() => undefined);
     await engine.close();
