@@ -680,6 +680,14 @@ test("MCP servers go over stdin with the bundled Claude Code and on the command 
   assert.deepEqual(custom.queries.map((query) => query.options.mcpServersDelivery), ["argv", "argv"]);
   await own.close();
 
+  const extra = fakeClaudeSdk();
+  const viaExtra = new ClaudeEngine({ sdk: extra.sdk });
+  await viaExtra.startThread({ cwd: "/tmp", claude: { extra: { pathToClaudeCodeExecutable: "/opt/claude" } } });
+  await viaExtra.startThread({ cwd: "/tmp", claude: { extra: { spawnClaudeCodeProcess: () => undefined } } });
+  await viaExtra.startThread({ cwd: "/tmp", claude: { extra: { spawnClaudeCodeProcess: () => undefined, mcpServersDelivery: "initialize" } } });
+  assert.deepEqual(extra.queries.map((query) => query.options.mcpServersDelivery), ["argv", "argv", "initialize"]);
+  await viaExtra.close();
+
   const chosen = fakeClaudeSdk();
   const opted = new ClaudeEngine({ sdk: chosen.sdk, executable: "/opt/claude", mcpServersDelivery: "initialize" });
   await opted.startThread({ cwd: "/tmp" });

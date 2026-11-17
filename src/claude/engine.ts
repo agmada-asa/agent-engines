@@ -710,9 +710,10 @@ export class ClaudeEngine implements Engine {
   /**
    * @internal How MCP servers reach a Claude Code process. Always set, since the SDK warns
    * when a custom executable leaves it unset; only the bundled one is sure to take `initialize`.
+   * `ownClaudeCode` is true when the process isn't the bundled binary (an executable or spawner was given).
    */
-  mcpServersDelivery(executable: string | undefined): "argv" | "initialize" {
-    return this.options.mcpServersDelivery ?? (executable ? "argv" : "initialize");
+  mcpServersDelivery(ownClaudeCode: boolean): "argv" | "initialize" {
+    return this.options.mcpServersDelivery ?? (ownClaudeCode ? "argv" : "initialize");
   }
 
   /** @internal The child environment: base plus thread extras, minus API keys when required. */
@@ -759,7 +760,7 @@ export class ClaudeEngine implements Engine {
         mcpServers: {},
         persistSession: false,
         ...(this.options.executable ? { pathToClaudeCodeExecutable: this.options.executable } : {}),
-        mcpServersDelivery: this.mcpServersDelivery(this.options.executable),
+        mcpServersDelivery: this.mcpServersDelivery(Boolean(this.options.executable)),
       },
     });
     let timer: ReturnType<typeof setTimeout> | undefined;
@@ -1478,7 +1479,10 @@ class ClaudeThread implements Thread {
       ...(claude.hooks ? { hooks: claude.hooks as Options["hooks"] } : {}),
       ...(claude.plugins ? { plugins: claude.plugins } : {}),
       ...((claude.executable ?? this.engine.options.executable) ? { pathToClaudeCodeExecutable: claude.executable ?? this.engine.options.executable } : {}),
-      mcpServersDelivery: this.engine.mcpServersDelivery(claude.executable ?? this.engine.options.executable),
+      // `extra` can also start a different Claude Code, and it's merged after this.
+      mcpServersDelivery: this.engine.mcpServersDelivery(Boolean(
+        claude.executable ?? this.engine.options.executable ?? claude.extra?.pathToClaudeCodeExecutable ?? claude.extra?.spawnClaudeCodeProcess,
+      )),
       ...(schema ? { outputFormat: { type: "json_schema", schema } } : {}),
       ...(limits.maxTurns !== undefined ? { maxTurns: limits.maxTurns } : {}),
       ...(limits.maxBudgetUsd !== undefined ? { maxBudgetUsd: limits.maxBudgetUsd } : {}),
