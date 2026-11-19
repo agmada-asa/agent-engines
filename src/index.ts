@@ -23,51 +23,17 @@ export function createEngine<P extends ProviderId>(provider: P, ...[options]: P 
   throw new Error(`Unknown provider ${String(provider)}.`);
 }
 
+// The JSON-RPC clients, normalisers, per-runtime mappers and the pieces the
+// engines build on are in `agent-engines/internals`, without a stability promise.
 export type * from "./types.ts";
-export {
-  CODEX_CAPABILITIES,
-  CodexEngine,
-  codexCommands,
-  codexModelInfo,
-  codexThreadSummary,
-  codexUsage,
-  type CodexEngineOptions,
-  type CodexToolCall,
-  type CodexToolContent,
-  type CodexToolResult,
-} from "./codex/engine.ts";
-export {
-  CLAUDE_CAPABILITIES,
-  CLAUDE_CODE_MIN_VERSION,
-  ClaudeEngine,
-  claudeCommands,
-  claudeModelInfo,
-  claudeUsageReport,
-  type ClaudeEngineOptions,
-  type ClaudeSdk,
-} from "./claude/engine.ts";
+export { CODEX_CAPABILITIES, CodexEngine, type CodexEngineOptions, type CodexToolCall, type CodexToolContent, type CodexToolResult } from "./codex/engine.ts";
+export { CLAUDE_CAPABILITIES, CLAUDE_CODE_MIN_VERSION, ClaudeEngine, type ClaudeEngineOptions, type ClaudeSdk } from "./claude/engine.ts";
 export { ACP_AGENTS, AcpEngine, type AcpEngineOptions } from "./acp/engine.ts";
-export { ACP_PROTOCOL_VERSION, AcpClient, AcpRpcError, type AcpChildProcess, type AcpClientOptions, type SpawnAcpProcess } from "./acp/client.ts";
-export { AcpNormalizer, acpTool } from "./acp/normalize.ts";
-export { renderTranscript, responsesItems, seedPreamble } from "./handoff.ts";
-export { fuzzyScore, localFileSearch } from "./files.ts";
-export { unifiedDiff } from "./diff.ts";
-export { CheckpointStore, gitRepository, restoreTree, reverseChanges, reverseDiff, snapshotTree } from "./checkpoints.ts";
-export { reviewPrompt } from "./review.ts";
+export { ACP_PROTOCOL_VERSION, AcpRpcError, type AcpChildProcess, type SpawnAcpProcess } from "./acp/client.ts";
+export { CodexRpcError, appServerArgs, type CodexChildProcess, type CodexLaunchOptions, type SpawnCodexProcess } from "./codex/client.ts";
+export { renderTranscript } from "./handoff.ts";
+export { CheckpointStore, gitRepository, snapshotTree } from "./checkpoints.ts";
 export { findSharedClaude, runtimeReleaseNotes, runtimeVersion, updateRuntime, type AcpUpdater, type RuntimeTarget } from "./runtime-updates.ts";
-export {
-  CodexClient,
-  CodexRpcError,
-  appServerArgs,
-  type CodexChildProcess,
-  type CodexClientOptions,
-  type CodexLaunchOptions,
-  type CodexNotification,
-  type CodexServerRequestHandler,
-  type SpawnCodexProcess,
-} from "./codex/client.ts";
-export { CodexNormalizer, classifyCodexError, codexGoal, codexRequest } from "./codex/normalize.ts";
-export { ClaudeNormalizer, classifyClaudeError, claudeHistory, claudeUsage } from "./claude/normalize.ts";
 export {
   AgentEngineError,
   ConversationRevertError,
@@ -82,18 +48,9 @@ export {
   UnsupportedFeatureError,
   type RuntimeUpdateFailure,
 } from "./errors.ts";
-export {
-  CODEX_PROTOCOL_CONTRACT,
-  checkMinimumVersion,
-  codexProtocolProblems,
-  diffModelCatalog,
-  hasModelCatalogDrift,
-  parseRuntimeVersion,
-  readCodexProtocolSurface,
-  type ComparableModel,
-  type ModelCatalogDrift,
-} from "./compat.ts";
-export { CODEX_PROTOCOL_VERSION, codexVersionIncompatibility } from "./codex/protocol/version.ts";
+export { diffModelCatalog, hasModelCatalogDrift, type ComparableModel, type ModelCatalogDrift } from "./compat.ts";
+export { checkMinimumVersion, codexVersionIncompatibility } from "./versions.ts";
+export { CODEX_PROTOCOL_VERSION } from "./codex/protocol/version.ts";
 export {
   LOCKED_DOWN_CODEX_FEATURES,
   configuredMcpServerNames,

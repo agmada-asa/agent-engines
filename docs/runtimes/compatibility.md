@@ -2,7 +2,7 @@
 
 ## Codex
 
-- `src/codex/protocol/` is generated from the Codex CLI pinned in `src/codex/protocol/version.ts`.
+- `src/codex/protocol/` is generated from the Codex CLI pinned in `src/codex/protocol/version.ts`. Only the types the source imports, and what they reference, are kept, and a test fails if a checked-in binding is no longer reachable.
 - Codex at or above the pinned version, within the same major, is accepted. Real drift fails where it happens.
 - The bindings are generated with Codex's experimental API (plan mode, background terminals and realtime need it), and the client opts in to it on `initialize`.
 

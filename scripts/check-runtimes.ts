@@ -23,7 +23,8 @@ import { join } from "node:path";
 import { promisify } from "node:util";
 import { ClaudeEngine } from "../src/claude/engine.ts";
 import { CodexEngine } from "../src/codex/engine.ts";
-import { CODEX_PROTOCOL_VERSION, codexVersionIncompatibility } from "../src/codex/protocol/version.ts";
+import { CODEX_PROTOCOL_VERSION } from "../src/codex/protocol/version.ts";
+import { codexVersionIncompatibility } from "../src/versions.ts";
 import {
   CODEX_PROTOCOL_CONTRACT,
   codexProtocolProblems,

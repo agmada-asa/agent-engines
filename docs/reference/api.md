@@ -61,20 +61,30 @@ Related: `LOCKED_DOWN_CODEX_FEATURES`, `configuredMcpServerNames()`, `readConfig
 
 ## Helpers
 
-- Handoffs: `renderTranscript()`, `seedPreamble()`, `responsesItems()`
-- File search: `localFileSearch()`, `fuzzyScore()`
-- Diffs: `unifiedDiff()`
-- Review: `reviewPrompt()`
-- Checkpoints: `CheckpointStore`, `gitRepository()`, `snapshotTree()`, `restoreTree()`, `reverseChanges()`, `reverseDiff()`
+- Handoffs: `renderTranscript()`
+- Checkpoints: `CheckpointStore`, `gitRepository()`, `snapshotTree()`
 - Runtime versions: `runtimeVersion()`, `updateRuntime()`, `findSharedClaude()`, `runtimeReleaseNotes()`
+- Compatibility: `checkMinimumVersion()`, `codexVersionIncompatibility()`, `diffModelCatalog()`, `hasModelCatalogDrift()`
+- Launching Codex yourself: `appServerArgs()`, with the `SpawnCodexProcess` and `SpawnAcpProcess` options
+- JSON-RPC errors a call can throw: `CodexRpcError`, `AcpRpcError`
 
 ## Constants
 
 `CODEX_CAPABILITIES`, `CLAUDE_CAPABILITIES`, `CLAUDE_CODE_MIN_VERSION`, `CODEX_PROTOCOL_VERSION`, `ACP_PROTOCOL_VERSION`, `ACP_AGENTS`.
 
-## Lower level
+## Internals
 
-- JSON-RPC clients: `CodexClient`, `AcpClient`, `CodexRpcError`, `AcpRpcError`, `appServerArgs()`
+The pieces the engines are built from are in a second entry point, `agent-engines/internals`. They follow each runtime's own format closely, so they can change in any minor release.
+
+```ts
+import { CodexClient, CodexNormalizer } from "agent-engines/internals";
+```
+
+- JSON-RPC clients: `CodexClient`, `AcpClient`
 - Normalisers: `CodexNormalizer`, `ClaudeNormalizer`, `AcpNormalizer`, `acpTool()`
 - Per-runtime mappers: `codexCommands()`, `codexModelInfo()`, `codexThreadSummary()`, `codexUsage()`, `codexGoal()`, `codexRequest()`, `classifyCodexError()`, `claudeCommands()`, `claudeModelInfo()`, `claudeUsageReport()`, `claudeHistory()`, `claudeUsage()`, `classifyClaudeError()`
-- Compatibility: `CODEX_PROTOCOL_CONTRACT`, `checkMinimumVersion()`, `codexProtocolProblems()`, `codexVersionIncompatibility()`, `diffModelCatalog()`, `hasModelCatalogDrift()`, `parseRuntimeVersion()`, `readCodexProtocolSurface()`
+- Handoff seeds: `seedPreamble()`, `responsesItems()`
+- File search and diffs: `localFileSearch()`, `fuzzyScore()`, `unifiedDiff()`
+- Review: `reviewPrompt()`
+- Checkpoint steps: `restoreTree()`, `reverseChanges()`, `reverseDiff()`
+- Protocol checks: `CODEX_PROTOCOL_CONTRACT`, `codexProtocolProblems()`, `readCodexProtocolSurface()`, `parseRuntimeVersion()`

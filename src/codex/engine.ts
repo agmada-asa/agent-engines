@@ -17,11 +17,10 @@ import {
   ConversationRevertError,
   RuntimeAuthError,
   RuntimeCompatibilityError,
-  RuntimeConnectionError,
   RuntimeModelSubstitutionError,
-  RuntimeModelUnavailableError,
   SteerRejectedError,
   UnsupportedFeatureError,
+  turnError,
 } from "../errors.ts";
 import { CheckpointStore, restoreTree, reverseChanges, snapshotTree } from "../checkpoints.ts";
 import { attachedFilesNote, privateTempDir, saveAttachment } from "../files.ts";
@@ -1494,14 +1493,7 @@ class CodexThread implements Thread {
 
   private failTurn(turn: TurnHandle, error: unknown): void {
     if (turn.done) return;
-    const message = error instanceof Error ? error.message : String(error);
-    // The same kinds the Claude engine gives, so an app can offer a sign-in or wait for the connection
-    // whichever runtime the turn failed to start on.
-    const kind = error instanceof RuntimeAuthError ? "auth"
-      : error instanceof RuntimeConnectionError ? "connection"
-      : error instanceof RuntimeModelSubstitutionError || error instanceof RuntimeModelUnavailableError ? "model"
-      : "other";
-    const event: AgentEvent = { threadId: this.id, turnId: turn.turnId ?? "", type: "turn.failed", error: { kind, message } };
+    const event: AgentEvent = { threadId: this.id, turnId: turn.turnId ?? "", type: "turn.failed", error: turnError(error) };
     turn.push(event);
     emitTo(this.listeners, event);
     turn.finish(turnResult(event));

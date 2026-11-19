@@ -5,12 +5,12 @@ import { readFile } from "node:fs/promises";
 import { test } from "node:test";
 import {
   CODEX_PROTOCOL_CONTRACT,
-  checkMinimumVersion,
   codexProtocolProblems,
   diffModelCatalog,
   hasModelCatalogDrift,
   type CodexProtocolSurface,
 } from "../src/compat.ts";
+import { checkMinimumVersion } from "../src/versions.ts";
 
 const source = (path: string) => readFile(new URL(`../src/codex/${path}`, import.meta.url), "utf8");
 
