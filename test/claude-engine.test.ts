@@ -757,3 +757,22 @@ test("a model Claude Code picked instead of the requested one fails the turn as 
   assert.deepEqual(result.error, { kind: "model", message: "Claude Code selected claude-other; claude-haiku-5-5 was requested." });
   await engine.close();
 });
+
+test("a mid-turn switch to a model outside fallbackModels fails the turn as a model error; a listed fallback does not", async () => {
+  const reroute = (to: string) => ({ type: "system", subtype: "model_refusal_fallback", original_model: "claude-haiku-5-5", fallback_model: to, trigger: "refusal", direction: "retry", request_id: null, content: "" });
+  const { sdk } = fakeClaudeSdk({
+    onUser: (message, query) => {
+      const text = String(message.message?.content?.[0]?.text ?? message.message?.content ?? "");
+      query.emit(reroute(text.includes("listed") ? "claude-fallback" : "claude-other"));
+      query.emit({ type: "result", subtype: "success", is_error: false, result: "done", modelUsage: {} });
+    },
+  });
+  const engine = new ClaudeEngine({ sdk });
+  const thread = await engine.startThread({ cwd: "/tmp", model: "claude-haiku-5-5", fallbackModels: ["claude-fallback"] });
+  const unlisted = await thread.run("Hi").result;
+  assert.equal(unlisted.status, "failed");
+  assert.deepEqual(unlisted.error, { kind: "model", message: "Claude selected claude-other; claude-haiku-5-5 was requested." });
+  const listed = await thread.run("Hi, listed").result;
+  assert.equal(listed.status, "completed");
+  await engine.close();
+});
