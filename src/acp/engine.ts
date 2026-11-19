@@ -13,7 +13,7 @@
 import { randomUUID } from "node:crypto";
 import { homedir, tmpdir } from "node:os";
 import { isAbsolute } from "node:path";
-import { AgentEngineError, RuntimeConnectionError, SteerRejectedError, UnsupportedFeatureError } from "../errors.ts";
+import { AgentEngineError, SteerRejectedError, UnsupportedFeatureError, turnError } from "../errors.ts";
 import { isTextMedia, localFileSearch, readFileInput } from "../files.ts";
 import { seedPreamble } from "../handoff.ts";
 import { reviewPrompt } from "../review.ts";
@@ -1140,9 +1140,10 @@ class AcpThread implements Thread {
   }
 
   private failTurn(turn: TurnHandle, error: unknown): void {
-    const message = error instanceof Error ? error.message : String(error);
-    const kind = error instanceof RuntimeConnectionError ? "connection" : error instanceof AcpRpcError && error.code === -32000 ? "auth" : "other";
-    this.finish(turn, { status: "failed", error: { kind, message } });
+    const failure = turnError(error);
+    // ACP's "authentication required" JSON-RPC error.
+    if (error instanceof AcpRpcError && error.code === -32000) failure.kind = "auth";
+    this.finish(turn, { status: "failed", error: failure });
   }
 
   private dispatch(event: AgentEvent): void {

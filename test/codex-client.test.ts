@@ -4,7 +4,7 @@ import assert from "node:assert/strict";
 import { test } from "node:test";
 import { CodexClient, CodexRpcError, appServerArgs, parseServerVersion, refusalFor } from "../src/codex/client.ts";
 import { RuntimeCompatibilityError, RuntimeConnectionError, RuntimeProtocolError } from "../src/errors.ts";
-import { codexVersionIncompatibility } from "../src/codex/protocol/version.ts";
+import { codexVersionIncompatibility } from "../src/versions.ts";
 import { NO_REPLY, fakeSpawner, until } from "./fake-app-server.ts";
 
 test("connect completes initialize, sends initialized and records the version", async () => {

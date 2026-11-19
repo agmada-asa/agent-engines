@@ -36,11 +36,14 @@ import {
   RuntimeAuthError,
   RuntimeCompatibilityError,
   RuntimeConnectionError,
+  RuntimeModelSubstitutionError,
   RuntimeModelUnavailableError,
   SteerRejectedError,
   UnsupportedFeatureError,
+  turnError,
 } from "../errors.ts";
-import { CLAUDE_CODE_MIN_VERSION, checkMinimumVersion } from "../compat.ts";
+import { CLAUDE_CODE_MIN_VERSION } from "../compat.ts";
+import { checkMinimumVersion } from "../versions.ts";
 import { claudeSessionVersion, runtimeVersion, updateRuntime } from "../runtime-updates.ts";
 import { attachedFilesNote, isTextMedia, localFileSearch, mediaTypeOf, readFileInput, saveAttachment } from "../files.ts";
 import { seedPreamble } from "../handoff.ts";
@@ -1313,7 +1316,7 @@ class ClaudeThread implements Thread {
     if (m.type === "system" && m.subtype === "init") {
       const allowed = new Set([this.expectedModel, this.options.model, ...(this.options.fallbackModels ?? [])]);
       if (this.expectedModel && this.options.strictModel !== false && !allowed.has(m.model) && this.current && !this.current.done) {
-        this.failTurn(this.current, Object.assign(new AgentEngineError(`Claude Code selected ${m.model}; ${this.options.model} was requested.`), { kind: "model" }));
+        this.failTurn(this.current, new RuntimeModelSubstitutionError(String(this.options.model), m.model, "Claude Code"));
         void this.query?.interrupt().catch(() => undefined);
       }
       const turn = this.current && !this.current.done ? this.current : undefined;
@@ -1344,7 +1347,7 @@ class ClaudeThread implements Thread {
       this.dispatch(event);
       const fallback = event.type === "model.rerouted" && (this.options.fallbackModels ?? []).includes(event.to);
       if (event.type === "model.rerouted" && this.options.strictModel !== false && turn && !fallback) {
-        this.failTurn(turn, Object.assign(new AgentEngineError(`Claude switched from ${event.from} to ${event.to}.`), { kind: "model" }));
+        this.failTurn(turn, new RuntimeModelSubstitutionError(event.from, event.to, "Claude"));
         void this.query?.interrupt().catch(() => undefined);
       }
     }
@@ -1414,11 +1417,7 @@ class ClaudeThread implements Thread {
   }
 
   private failTurn(turn: TurnHandle, error: unknown): void {
-    const message = error instanceof Error ? error.message : String(error);
-    const kind = (error as { kind?: string })?.kind === "model" || error instanceof RuntimeModelUnavailableError
-      ? "model"
-      : error instanceof RuntimeAuthError ? "auth" : error instanceof RuntimeConnectionError ? "connection" : "other";
-    this.finish(turn, { status: "failed", error: { kind, message } });
+    this.finish(turn, { status: "failed", error: turnError(error) });
   }
 
   private dispatch(event: AgentEvent): void {

@@ -1,5 +1,7 @@
 /** @file Visible failures at the runtime boundary (Codex app-server or Claude Code). */
 
+import type { TurnError } from "./types.ts";
+
 /** Base error for connection, protocol, compatibility, sign-in and model failures. */
 export class AgentEngineError extends Error {
   /** Creates a named error and keeps an optional underlying cause. */
@@ -112,4 +114,17 @@ export class UnsupportedFeatureError extends AgentEngineError {
   ) {
     super(`${provider} cannot ${feature}${detail ? `: ${detail}` : "."}`);
   }
+}
+
+/**
+ * The `TurnError` for an error that ended a turn, sorted the same way on every runtime, so an
+ * app can offer a sign-in, a model change or a wait for the connection whichever runtime failed.
+ */
+export function turnError(error: unknown): TurnError {
+  const message = error instanceof Error ? error.message : String(error);
+  const kind = error instanceof RuntimeAuthError ? "auth"
+    : error instanceof RuntimeConnectionError ? "connection"
+    : error instanceof RuntimeModelUnavailableError || error instanceof RuntimeModelSubstitutionError ? "model"
+    : "other";
+  return { kind, message };
 }

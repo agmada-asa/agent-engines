@@ -17,8 +17,8 @@ import { access, open, readFile, realpath, stat } from "node:fs/promises";
 import { createRequire } from "node:module";
 import { tmpdir } from "node:os";
 import { delimiter, dirname, join, resolve } from "node:path";
-import { CODEX_PROTOCOL_VERSION, codexVersionIncompatibility } from "./codex/protocol/version.ts";
-import { CLAUDE_CODE_MIN_VERSION, checkMinimumVersion, compareVersions, parseRuntimeVersion } from "./compat.ts";
+import { CODEX_PROTOCOL_VERSION } from "./codex/protocol/version.ts";
+import { CLAUDE_CODE_MIN_VERSION } from "./compat.ts";
 import { AgentEngineError, RuntimeUpdateError } from "./errors.ts";
 import type {
   BundledClaude,
@@ -33,6 +33,7 @@ import type {
   RuntimeVersionStatus,
   SharedClaude,
 } from "./types.ts";
+import { checkMinimumVersion, codexVersionIncompatibility, compareVersions, isNewer, isStrictSemver, parseRuntimeVersion } from "./versions.ts";
 
 /** The runtimes this library can check and update. */
 type ManagedProvider = Exclude<ProviderId, "acp">;
@@ -110,39 +111,6 @@ const SPECS = {
 } as const;
 
 type Spec = (typeof SPECS)[ManagedProvider];
-
-/** `major.minor.patch[-prerelease]`, per semver.org. Build metadata means nothing to a registry, so it is refused too. */
-const STRICT_SEMVER = /^(0|[1-9]\d*)\.(0|[1-9]\d*)\.(0|[1-9]\d*)(-(0|[1-9]\d*|\d*[a-zA-Z-][0-9a-zA-Z-]*)(\.(0|[1-9]\d*|\d*[a-zA-Z-][0-9a-zA-Z-]*))*)?$/u;
-
-/** Whether `version` is safe to pass to an installer. */
-function isStrictSemver(version: string): boolean {
-  return STRICT_SEMVER.test(version);
-}
-
-/** Whether `candidate` is a later semver release, including prerelease precedence. */
-function isNewer(candidate: string, current: string): boolean {
-  const next = parseRuntimeVersion(candidate);
-  const now = parseRuntimeVersion(current);
-  if (!next || !now) return false;
-  const order = compareVersions(next, now);
-  if (order !== 0) return order > 0;
-  const prerelease = (version: string) => version.includes("-") ? version.slice(version.indexOf("-") + 1).split(".") : [];
-  const left = prerelease(candidate);
-  const right = prerelease(current);
-  if (!left.length || !right.length) return Boolean(right.length && !left.length);
-  for (let index = 0; index < Math.max(left.length, right.length); index++) {
-    const a = left[index];
-    const b = right[index];
-    if (a === undefined || b === undefined) return a !== undefined;
-    if (a === b) continue;
-    const aNumeric = /^\d+$/u.test(a);
-    const bNumeric = /^\d+$/u.test(b);
-    if (aNumeric !== bNumeric) return !aNumeric;
-    // Compare numeric identifiers without losing precision on long digit strings.
-    return aNumeric && a.length !== b.length ? a.length > b.length : a > b;
-  }
-  return false;
-}
 
 /** Why the engine would refuse to run `version`, in the same terms as the check it runs. */
 function incompatibility(provider: ManagedProvider, version: string, minimumVersion?: string): string | undefined {

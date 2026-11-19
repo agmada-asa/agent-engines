@@ -19,7 +19,8 @@ import {
 } from "../errors.ts";
 import type { InitializeParams } from "./protocol/InitializeParams.ts";
 import type { InitializeResponse } from "./protocol/InitializeResponse.ts";
-import { CODEX_PROTOCOL_VERSION, codexVersionIncompatibility } from "./protocol/version.ts";
+import { CODEX_PROTOCOL_VERSION } from "./protocol/version.ts";
+import { codexVersionIncompatibility } from "../versions.ts";
 
 const DEFAULT_REQUEST_TIMEOUT_MS = 60_000;
 const DEFAULT_MAX_LINE_BYTES = 8_000_000;

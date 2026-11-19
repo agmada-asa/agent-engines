@@ -15,29 +15,6 @@ import { join } from "node:path";
 export const CLAUDE_CODE_MIN_VERSION = "2.1.248";
 
 /**
- * Explains why `version` is older than `minimum`, or returns undefined when it
- * is recent enough. Compares the first `major.minor.patch` in each string.
- */
-export function checkMinimumVersion(version: string, minimum: string): string | undefined {
-  const parsed = parseRuntimeVersion(version);
-  const floor = parseRuntimeVersion(minimum);
-  if (!parsed || !floor) return `${version} is not a recognisable version`;
-  return compareVersions(parsed, floor) < 0 ? `${minimum} or newer is required` : undefined;
-}
-
-/** Reads the first `major.minor.patch` triple from CLI version output. */
-export function parseRuntimeVersion(output: string): readonly [number, number, number] | undefined {
-  const match = output.match(/\b(\d+)\.(\d+)\.(\d+)\b/u);
-  if (!match) return undefined;
-  return [Number(match[1]), Number(match[2]), Number(match[3])];
-}
-
-/** Orders two version triples. */
-export function compareVersions(left: readonly [number, number, number], right: readonly [number, number, number]): number {
-  return left[0] - right[0] || left[1] - right[1] || left[2] - right[2];
-}
-
-/**
  * The Codex app-server protocol surface the engine calls or interprets. Enum
  * entries list only the values the engine branches on, so values Codex adds
  * later do not count as drift.
