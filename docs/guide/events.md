@@ -1,6 +1,6 @@
 # Events
 
-A turn is an async iterable of `AgentEvent`s. `thread.subscribe()` sees every event on the thread, including turns the agent starts by itself, as Claude does when a background subagent reports back.
+A turn is an async iterable of `AgentEvent`s. `thread.subscribe()` sees every event on the thread, including turns the agent starts by itself, as Claude does when a background subagent reports back. Claude runs subagents in the background unless told otherwise, and with the Claude Code 2.1.332 bundled from 0.11.1 a turn can end before a subagent it started does. The subagent's own events, including its `model.confirmed`, and Claude's answer to its report then arrive only through `subscribe()`.
 
 ## All event types
 

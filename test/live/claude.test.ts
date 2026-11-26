@@ -76,10 +76,18 @@ test("Claude: a subagent's real model is confirmed from its own messages", { ski
     threadId = thread.id;
     const subagents = new Set<string>();
     const confirmed: { agentId?: string; model: string }[] = [];
-    for await (const event of thread.run("Use the Agent tool with subagent_type \"replier\" and the prompt \"Go\". Then reply with its word.")) {
+    // Claude Code 2.1.332 can end the turn while the subagent still runs in the background,
+    // so listen on the thread, across turns, until the subagent has ended.
+    let ended!: () => void;
+    const subagentEnded = new Promise<void>((resolve) => { ended = resolve; });
+    const unsubscribe = thread.subscribe((event) => {
       if (event.type === "subagent.started") subagents.add(event.subagentId);
       if (event.type === "model.confirmed") confirmed.push({ agentId: event.agentId, model: event.model });
-    }
+      if (event.type === "subagent.ended") ended();
+    });
+    for await (const _ of thread.run("Use the Agent tool with subagent_type \"replier\" and the prompt \"Go\". Then reply with its word.")) { /* events are read by subscribe */ }
+    await Promise.race([subagentEnded, new Promise((resolve) => setTimeout(resolve, 120_000))]);
+    unsubscribe();
     t.diagnostic(JSON.stringify(confirmed));
     assert.ok(subagents.size > 0, "the subagent started");
     assert.ok(confirmed.some((entry) => !entry.agentId && entry.model.includes("haiku")), "the main agent is confirmed on its own model");
