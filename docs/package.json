@@ -8,10 +8,11 @@
     "preview": "vitepress preview"
   },
   "devDependencies": {
+    "lucide-vue-next": "^1.0.0",
     "vitepress": "^1.6.4"
   },
   "dependencies": {
-    "@fontsource-variable/instrument-sans": "^5.3.0",
-    "@fontsource/bbh-bartle": "^5.3.0"
+    "@fontsource-variable/archivo": "^5.3.0",
+    "@fontsource-variable/instrument-sans": "^5.3.0"
   }
 }

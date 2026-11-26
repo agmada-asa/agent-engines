@@ -6,9 +6,12 @@ export default defineConfig({
   base: "/agent-engines/",
   cleanUrls: true,
   lastUpdated: true,
-  // The site is light only, so the dark mode toggle is removed.
-  appearance: false,
-  head: [["meta", { name: "theme-color", content: "#f3f0e8" }]],
+  // Light and dark mode follow the system until the reader picks one with the toggle.
+  appearance: true,
+  head: [
+    ["meta", { name: "theme-color", media: "(prefers-color-scheme: light)", content: "#f3f0e8" }],
+    ["meta", { name: "theme-color", media: "(prefers-color-scheme: dark)", content: "#0d0c0a" }],
+  ],
   themeConfig: {
     nav: [
       { text: "Guide", link: "/guide/getting-started" },
