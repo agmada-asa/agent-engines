@@ -1,7 +1,7 @@
 /*
  * Visual theme for the agent-engines docs.
- * Light only: warm paper and near-black ink, one blue for links and focus,
- * a condensed display face for headlines, and pill-shaped buttons.
+ * Warm paper and near-black ink, swapped round in dark mode; one blue for links
+ * and focus; an expanded display face for headlines; pill-shaped buttons.
  * Variables come first; the rules below only cover what variables can't reach.
  */
 
@@ -16,16 +16,22 @@
   --ae-ink: #14130f;
   --ae-ink-muted: #514e47;
   --ae-ink-subtle: #6e6659;
+  --ae-ink-hover: #2c2a24;
+  --ae-ink-active: #3a382f;
   --ae-blue: #286bf1;
   --ae-blue-deep: #1e53cb;
   --ae-blue-hover: #17459f;
   --ae-blue-tint: rgb(40 107 241 / 0.12);
+  --ae-glow: rgb(40 107 241 / 0.32);
   --ae-rule: rgb(20 19 15 / 0.22);
   --ae-rule-soft: rgb(20 19 15 / 0.12);
+  --ae-wash: rgb(20 19 15 / 0.06);
+  --ae-outline: rgb(20 19 15 / 0.35);
+  --ae-backdrop: rgb(20 19 15 / 0.4);
 
   /* Type */
   --ae-font-body: "Instrument Sans Variable", "Instrument Sans", sans-serif;
-  --ae-font-display: "BBH Bartle", "Arial Black", sans-serif;
+  --ae-font-display: "Archivo Variable", "Archivo", sans-serif;
 
   /* VitePress variables */
   --vp-font-family-base: var(--ae-font-body);
@@ -42,7 +48,7 @@
   --vp-c-text-2: var(--ae-ink-muted);
   --vp-c-text-3: var(--ae-ink-subtle);
 
-  --vp-c-default-soft: rgb(20 19 15 / 0.06);
+  --vp-c-default-soft: var(--ae-wash);
   --vp-c-brand-1: var(--ae-blue-deep);
   --vp-c-brand-2: var(--ae-blue-hover);
   --vp-c-brand-3: var(--ae-blue);
@@ -52,10 +58,10 @@
   --vp-nav-screen-bg-color: var(--ae-paper);
   --vp-sidebar-bg-color: var(--ae-paper);
   --vp-local-nav-bg-color: var(--ae-paper);
-  --vp-backdrop-bg-color: rgb(20 19 15 / 0.4);
+  --vp-backdrop-bg-color: var(--ae-backdrop);
 
   --vp-code-color: var(--ae-ink);
-  --vp-code-bg: rgb(20 19 15 / 0.06);
+  --vp-code-bg: var(--ae-wash);
   --vp-code-block-bg: var(--ae-code);
   --vp-code-block-divider-color: var(--ae-rule-soft);
   --vp-code-line-number-color: var(--ae-ink-subtle);
@@ -69,14 +75,14 @@
   --vp-button-brand-border: var(--ae-ink);
   --vp-button-brand-text: var(--ae-paper);
   --vp-button-brand-bg: var(--ae-ink);
-  --vp-button-brand-hover-border: #2c2a24;
+  --vp-button-brand-hover-border: var(--ae-ink-hover);
   --vp-button-brand-hover-text: var(--ae-paper);
-  --vp-button-brand-hover-bg: #2c2a24;
-  --vp-button-brand-active-border: #3a382f;
+  --vp-button-brand-hover-bg: var(--ae-ink-hover);
+  --vp-button-brand-active-border: var(--ae-ink-active);
   --vp-button-brand-active-text: var(--ae-paper);
-  --vp-button-brand-active-bg: #3a382f;
+  --vp-button-brand-active-bg: var(--ae-ink-active);
 
-  --vp-button-alt-border: rgb(20 19 15 / 0.35);
+  --vp-button-alt-border: var(--ae-outline);
   --vp-button-alt-text: var(--ae-ink);
   --vp-button-alt-bg: transparent;
   --vp-button-alt-hover-border: var(--ae-ink);
@@ -85,10 +91,6 @@
   --vp-button-alt-active-border: var(--ae-ink);
   --vp-button-alt-active-text: var(--ae-paper);
   --vp-button-alt-active-bg: var(--ae-ink);
-
-  /* Home hero: a small uppercase label above a large display headline */
-  --vp-home-hero-name-color: var(--ae-ink-subtle);
-  --vp-home-hero-name-background: none;
 
   --vp-input-border-color: var(--ae-rule);
   --vp-input-bg-color: var(--ae-panel);
@@ -101,9 +103,51 @@
   --vp-local-search-highlight-text: var(--ae-ink);
 }
 
+/* Dark mode: near-black paper and cream ink, with a lighter blue so links stay readable. */
+.dark {
+  color-scheme: dark;
+
+  --ae-paper: #0d0c0a;
+  --ae-panel: #161512;
+  --ae-sand: #201e1a;
+  --ae-code: #161512;
+  --ae-ink: #f3f0e8;
+  --ae-ink-muted: #bdb6a8;
+  --ae-ink-subtle: #9b9486;
+  --ae-ink-hover: #dcd8ce;
+  --ae-ink-active: #c9c4b8;
+  --ae-blue: #4a86ff;
+  --ae-blue-deep: #7ba4ff;
+  --ae-blue-hover: #a3c0ff;
+  --ae-blue-tint: rgb(74 134 255 / 0.16);
+  --ae-glow: rgb(40 107 241 / 0.42);
+  --ae-rule: rgb(243 240 232 / 0.2);
+  --ae-rule-soft: rgb(243 240 232 / 0.1);
+  --ae-wash: rgb(243 240 232 / 0.08);
+  --ae-outline: rgb(243 240 232 / 0.35);
+  --ae-backdrop: rgb(0 0 0 / 0.6);
+}
+
 ::selection {
   background: rgb(40 107 241 / 0.22);
   color: var(--ae-ink);
+}
+
+/* Theme toggle: a quiet round button, like the one on the site */
+.VPSwitchAppearance {
+  border-color: var(--ae-rule);
+  background-color: transparent;
+}
+
+.VPSwitchAppearance .check {
+  background-color: var(--ae-ink);
+}
+
+/* The sun and moon sit on the ink knob, so they take the paper colour.
+   VitePress colours the icon element itself, in both modes. */
+.VPSwitchAppearance .check .icon [class^="vpi-"],
+.dark .VPSwitchAppearance .check .icon [class^="vpi-"] {
+  color: var(--ae-paper);
 }
 
 @media (prefers-reduced-motion: reduce) {
@@ -200,11 +244,11 @@
 /* Document typography */
 .vp-doc h1 {
   font-family: var(--ae-font-display);
-  font-size: clamp(22px, 3.1vw, 40px);
-  font-weight: 400;
-  line-height: 1.1;
-  letter-spacing: -0.035em;
-  text-transform: uppercase;
+  font-stretch: 125%;
+  font-size: clamp(26px, 3.4vw, 44px);
+  font-weight: 640;
+  line-height: 1.08;
+  letter-spacing: -0.05em;
   overflow-wrap: break-word;
 }
 
@@ -319,7 +363,15 @@ a:focus-visible {
 .VPHome .VPHero {
   position: relative;
   isolation: isolate;
-  overflow: clip;
+  /* Clip the glow at the sides only: on narrow screens the logo row sits above the hero, and a top clip would cut the glow off in a hard line. */
+  overflow: clip visible;
+}
+
+/* On narrow screens the logo row (HeroAgents.vue) already spaces the headline from the nav bar. */
+@media (max-width: 1099px) {
+  .VPHome .ae-agents + .VPHero {
+    padding-top: calc(var(--vp-nav-height) + 28px);
+  }
 }
 
 .VPHome .VPHero::before {
@@ -331,34 +383,26 @@ a:focus-visible {
   width: min(640px, 120vw);
   aspect-ratio: 1;
   border-radius: 50%;
-  background: radial-gradient(circle, rgb(40 107 241 / 0.32), transparent 65%);
+  background: radial-gradient(circle, var(--ae-glow), transparent 65%);
   filter: blur(40px);
   pointer-events: none;
 }
 
-.VPHome .VPHero .name,
+/* The floating agent logos (HeroAgents.vue) sit in .VPHome, behind the hero text. */
+.VPHome {
+  position: relative;
+}
+
 .VPHome .VPHero .text {
-  max-width: 980px;
-  letter-spacing: -0.035em;
+  /* Narrow enough to break after "for", leaving the right side to the logos. */
+  max-width: 760px;
   white-space: normal;
-}
-
-.VPHome .VPHero .name {
-  font-family: var(--ae-font-body);
-  font-size: 12px;
-  font-weight: 550;
-  line-height: 1.4;
-  letter-spacing: 0.12em;
-  text-transform: uppercase;
-}
-
-.VPHome .VPHero .text {
-  margin-top: 14px;
   font-family: var(--ae-font-display);
-  font-size: clamp(30px, 8vw, 72px);
-  font-weight: 400;
-  line-height: 1.04;
-  text-transform: uppercase;
+  font-stretch: 125%;
+  font-size: clamp(34px, 8vw, 80px);
+  font-weight: 640;
+  line-height: 1.02;
+  letter-spacing: -0.055em;
   color: var(--ae-ink);
 }
 
@@ -374,39 +418,6 @@ a:focus-visible {
 .VPHome .VPHero .actions {
   gap: 12px 24px;
   padding-top: 32px;
-}
-
-/* Home features: hairline columns with a headline and body copy */
-.VPHome .VPFeatures .VPFeature {
-  border: 0;
-  border-top: 1px solid var(--ae-rule);
-  border-radius: 0;
-  background-color: transparent;
-  transition: border-color 0.25s;
-}
-
-.VPHome .VPFeatures .VPFeature.link:hover {
-  border-color: transparent;
-  border-top-color: var(--ae-blue-deep);
-}
-
-.VPHome .VPFeatures .VPFeature .box {
-  padding: 28px 0 0;
-}
-
-.VPHome .VPFeatures .VPFeature .title {
-  font-size: clamp(20px, 2vw, 24px);
-  font-weight: 550;
-  line-height: 1.2;
-  letter-spacing: -0.035em;
-  color: var(--ae-ink);
-}
-
-.VPHome .VPFeatures .VPFeature .details {
-  padding-top: 14px;
-  font-size: 16px;
-  line-height: 1.7;
-  color: var(--ae-ink-muted);
 }
 
 /* Footer and previous/next links */
@@ -440,9 +451,5 @@ a:focus-visible {
 
   .VPHome .VPHero .VPButton {
     width: 100%;
-  }
-
-  .VPHome .VPFeatures .VPFeature .box {
-    padding-top: 24px;
   }
 }
