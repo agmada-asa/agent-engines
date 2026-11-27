@@ -1,5 +1,26 @@
 ---
 layout: home
+head:
+  - - meta
+    - { property: "og:type", content: "website" }
+  - - meta
+    - { property: "og:url", content: "https://agmada-asa.github.io/agent-engines/" }
+  - - meta
+    - { property: "og:title", content: "agent-engines · One API for coding agents" }
+  - - meta
+    - { property: "og:description", content: "Run Codex, Claude and any ACP agent from one TypeScript API." }
+  - - meta
+    - { property: "og:image", content: "https://agmada-asa.github.io/agent-engines/og.png" }
+  - - meta
+    - { property: "og:image:type", content: "image/png" }
+  - - meta
+    - { property: "og:image:width", content: "1200" }
+  - - meta
+    - { property: "og:image:height", content: "630" }
+  - - meta
+    - { property: "og:image:alt", content: "agent-engines: One API for coding agents, with logos for Claude, Antigravity, Codex and OpenCode." }
+  - - meta
+    - { name: "twitter:card", content: "summary_large_image" }
 hero:
   text: One API for coding agents
   tagline: Run Codex, Claude and any ACP agent from your TypeScript app, through the same threads, turns and events.
